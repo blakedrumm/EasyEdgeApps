@@ -1,0 +1,9 @@
+.vscode/
+.idea/
+*.lnk
+*.ico
+*.log
+*.tmp
+.pending/
+TestResults/
+SHA256SUMS.txt
