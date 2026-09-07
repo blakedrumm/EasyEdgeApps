@@ -38,4 +38,4 @@ jobs:
       - name: Core behavior and safety
         run: ./tests/Test-EasyEdgeApps.ps1
       - name: Native setup controls and layout
-        run: ./tests/Test-EasyEdgeAppsGui.ps1
+        run: ./tests/Test-EasyEdgeAppsGui.ps1 -MaximumWindowWidth 1024 -MaximumWindowHeight 768

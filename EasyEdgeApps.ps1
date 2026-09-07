@@ -749,6 +749,7 @@ function New-EeaSetupForm {
     $layout.Dock = [Windows.Forms.DockStyle]::Fill
     $layout.ColumnCount = 1
     $layout.RowCount = 4
+    [void]$layout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
     [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Percent, 100)))
     [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
@@ -766,6 +767,7 @@ function New-EeaSetupForm {
     $content.Dock = [Windows.Forms.DockStyle]::Fill
     $content.ColumnCount = 2
     $content.RowCount = 1
+    [void]$content.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Percent, 100)))
     [void]$content.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 34)))
     [void]$content.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 66)))
     $layout.Controls.Add($content, 0, 1)
@@ -774,6 +776,7 @@ function New-EeaSetupForm {
     $listPanel.Dock = [Windows.Forms.DockStyle]::Fill
     $listPanel.ColumnCount = 1
     $listPanel.RowCount = 3
+    [void]$listPanel.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
     $listPanel.Margin = New-Object Windows.Forms.Padding(0, 0, 16, 0)
     [void]$listPanel.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     [void]$listPanel.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Percent, 100)))
@@ -795,16 +798,21 @@ function New-EeaSetupForm {
     $listPanel.Controls.Add($newButton, 0, 2)
     $content.Controls.Add($listPanel, 0, 0)
 
+    $editorViewport = New-Object Windows.Forms.Panel
+    $editorViewport.Dock = [Windows.Forms.DockStyle]::Fill
+    $editorViewport.AutoScroll = $true
+    $content.Controls.Add($editorViewport, 1, 0)
     $editor = New-Object Windows.Forms.TableLayoutPanel
-    $editor.Dock = [Windows.Forms.DockStyle]::Fill
+    $editor.Dock = [Windows.Forms.DockStyle]::Top
+    $editor.AutoSize = $true
+    $editor.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $editor.ColumnCount = 1
     $editor.RowCount = 8
-    $editor.AutoScroll = $true
-    for ($rowIndex = 0; $rowIndex -lt 7; $rowIndex++) {
+    [void]$editor.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
+    for ($rowIndex = 0; $rowIndex -lt 8; $rowIndex++) {
         [void]$editor.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     }
-    [void]$editor.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Percent, 100)))
-    $content.Controls.Add($editor, 1, 0)
+    $editorViewport.Controls.Add($editor)
     $nameLabel = New-Object Windows.Forms.Label
     $nameLabel.Text = '&Name'
     $nameLabel.AutoSize = $true
@@ -896,6 +904,7 @@ function New-EeaSetupForm {
         IconPreview = $iconPreview; IconLabel = $iconLabel; StatusLabel = $statusLabel
         SaveButton = $saveButton; OpenButton = $openButton; RemoveButton = $removeButton
         NewButton = $newButton; CloseButton = $closeButton
+        EditorViewport = $editorViewport
     }
 
     $appList.Add_SelectedIndexChanged({

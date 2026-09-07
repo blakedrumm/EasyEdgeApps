@@ -1,7 +1,11 @@
 #requires -Version 5.1
 
 [CmdletBinding()]
-param([string]$ScreenshotDirectory)
+param(
+    [string]$ScreenshotDirectory,
+    [int]$MaximumWindowWidth = 0,
+    [int]$MaximumWindowHeight = 0
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -36,8 +40,14 @@ function Assert-ControlLayout {
         if (-not $childControl.Visible) { continue }
         Assert-Gui ($childControl.Width -gt 0 -and $childControl.Height -gt 0) ('Empty control: ' + $childControl.Text)
         if ($Control -isnot [Windows.Forms.FlowLayoutPanel] -and -not $Control.AutoScroll) {
-            Assert-Gui ($childControl.Right -le $Control.ClientSize.Width + 2) ('Right clipping: ' + $childControl.Text)
-            Assert-Gui ($childControl.Bottom -le $Control.ClientSize.Height + 2) ('Bottom clipping: ' + $childControl.Text)
+            $layoutDetail = '{0} in {1}: {2}, parent client {3}' -f $childControl.GetType().Name, $Control.GetType().Name, $childControl.Bounds, $Control.ClientSize
+            Assert-Gui ($childControl.Right -le $Control.ClientSize.Width + 2) ('Right clipping: ' + $layoutDetail)
+            Assert-Gui ($childControl.Bottom -le $Control.ClientSize.Height + 2) ('Bottom clipping: ' + $layoutDetail)
+        }
+        elseif ($Control -is [Windows.Forms.ScrollableControl] -and $Control.AutoScroll) {
+            if ($childControl.Bottom -gt $Control.ClientSize.Height + 2) {
+                Assert-Gui $Control.VerticalScroll.Visible 'Overflowing content must have a usable vertical scrollbar.'
+            }
         }
         if ($childControl -is [Windows.Forms.Button]) {
             $textSize = [Windows.Forms.TextRenderer]::MeasureText($childControl.Text.Replace('&', ''), $childControl.Font)
@@ -75,9 +85,19 @@ try {
     foreach ($pointSize in @(12, 18, 24)) {
         $form.Font = New-Object Drawing.Font('Segoe UI', $pointSize)
         $form.PerformAutoScale()
+        if ($MaximumWindowWidth -gt 0 -and $MaximumWindowHeight -gt 0) {
+            $form.MaximumSize = New-Object Drawing.Size($MaximumWindowWidth, $MaximumWindowHeight)
+            Assert-Gui ($form.Width -le $MaximumWindowWidth -and $form.Height -le $MaximumWindowHeight) 'The test window must respect the requested screen limit.'
+        }
         $form.PerformLayout()
         [Windows.Forms.Application]::DoEvents()
         Assert-ControlLayout $form
+        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+            $ui.EditorViewport.ScrollControlIntoView($requiredControl)
+            [Windows.Forms.Application]::DoEvents()
+            $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
+            Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($controlBounds)) ('Required control must be reachable: ' + $requiredControl.Text)
+        }
         if ($ScreenshotDirectory) {
             [void][IO.Directory]::CreateDirectory($ScreenshotDirectory)
             $capture = New-Object Drawing.Bitmap($form.Width, $form.Height)
