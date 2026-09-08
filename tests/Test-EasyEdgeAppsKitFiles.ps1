@@ -62,6 +62,30 @@ try {
     Assert-KitFile (@(Get-ChildItem -LiteralPath $testRoot -Force -File).Count -eq 2) 'No plaintext temporary kit files should remain.'
     Write-Host ('PASS: Standard/encrypted file round-trips; full payload protection; encrypted export took {0:N2} seconds.' -f $timer.Elapsed.TotalSeconds)
 
+    $sessionKit = ConvertFrom-EeaJson ($kit | ConvertTo-Json -Depth 8)
+    $sessionKit.SchemaVersion = 2
+    $sessionKit.Apps[0] | Add-Member -NotePropertyName FreshSession -NotePropertyValue $true
+    $normalApp = ConvertFrom-EeaJson ($sessionKit.Apps[0] | ConvertTo-Json -Depth 8)
+    $normalApp.Name = 'Persistent News'
+    $normalApp.FreshSession = $false
+    $sessionKit.Apps = @($sessionKit.Apps[0], $normalApp)
+    foreach ($useProtection in @($false, $true)) {
+        $sessionKitPath = Join-Path $testRoot ('Sessions-' + $useProtection + '.eeakit.json')
+        $writeOptions = @{ Kit = $sessionKit; Path = $sessionKitPath; Confirm = $false }
+        $readOptions = @{ Path = $sessionKitPath }
+        if ($useProtection) {
+            $writeOptions.Protected = $true
+            $writeOptions.Password = $password
+            $writeOptions.PasswordConfirmation = $password
+            $readOptions.Password = $password
+        }
+        $null = Write-EeaKit @writeOptions
+        $restoredSessions = Read-EeaKit @readOptions
+        Assert-KitFile ($restoredSessions.SchemaVersion -eq 2 -and $restoredSessions.Apps[0].FreshSession -and -not $restoredSessions.Apps[1].FreshSession) 'Readable and protected kits must retain each website session choice.'
+        if ($useProtection) { Assert-KitFile ((Read-EeaKitDocument $sessionKitPath).SchemaVersion -eq 1) 'The encrypted envelope version must not change with its inner payload schema.' }
+    }
+    Write-Host 'PASS: Mixed fresh and persistent website choices survive readable and encrypted version-2 App Kits.'
+
     $envelope = Read-EeaKitDocument $protectedPath
     $second = Protect-EeaKit -Kit $kit -Password $password -PasswordConfirmation $password
     Assert-KitFile ($second.Salt -cne $envelope.Salt -and $second.Iv -cne $envelope.Iv -and $second.Ciphertext -cne $envelope.Ciphertext) 'Repeated exports require fresh salt, IV, and ciphertext.'

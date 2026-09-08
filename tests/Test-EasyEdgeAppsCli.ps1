@@ -42,7 +42,7 @@ if ($CommandCase -ne 'All') {
             $secret.Dispose()
             $secret = $restoredSecret
         }
-        if ($CommandCase -in @('UnattendedOpen', 'UnattendedInstall', 'OpenWithProfile')) {
+        if ($CommandCase -in @('UnattendedOpen', 'UnattendedInstall', 'OpenWithProfile', 'OpenFreshSession')) {
             $global:EeaCliTestLaunch = $null
             function Start-Process {
                 [CmdletBinding()]
@@ -56,6 +56,11 @@ if ($CommandCase -ne 'All') {
             ClearProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; EdgeProfile = ''; Unattended = $true } }
             InvalidProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/'; EdgeProfile = 'Profile 1" --injected'; Unattended = $true } }
             OpenWithProfile { @{ Action = 'Open'; Name = 'CLI website'; Unattended = $true } }
+            InstallFreshSession { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; EdgeProfile = 'Profile 1'; SessionMode = 'Fresh'; Unattended = $true } }
+            InstallNormalSession { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; SessionMode = 'Normal'; Unattended = $true } }
+            InvalidSessionMode { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/'; SessionMode = 'Unsafe'; Unattended = $true } }
+            SessionModeOnOpen { @{ Action = 'Open'; Name = 'CLI website'; SessionMode = 'Fresh'; Unattended = $true } }
+            OpenFreshSession { @{ Action = 'Open'; Name = 'CLI website'; Unattended = $true } }
             ImplicitInstall { @{ Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; Confirm = $false; Quiet = $true } }
             InstallWhatIf { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/'; WhatIf = $true } }
             List { @{ Action = 'List' } }
@@ -105,6 +110,10 @@ if ($CommandCase -ne 'All') {
         $global:LASTEXITCODE = if ($commandOptions.ContainsKey('Unattended')) { 47 } else { 0 }
         & $dispatcherPath @commandOptions | ConvertTo-Json -Depth 8 -Compress
         $commandExitCode = $LASTEXITCODE
+        if ($CommandCase -ceq 'OpenFreshSession' -and $commandExitCode -eq 0) {
+            $freshPaths = Get-EeaPaths $global:EeaCliTestContext 'CLI website'
+            Assert-Cli ($null -ne $global:EeaCliTestLaunch -and $global:EeaCliTestLaunch.FilePath -ceq $freshPaths.Launcher -and -not $global:EeaCliTestLaunch.ArgumentList) 'Fresh-session Open must use the owned native launcher without forwarded arguments.'
+        }
         if ($CommandCase -in @('UnattendedOpen', 'UnattendedInstall', 'OpenWithProfile') -and $commandExitCode -eq 0) {
             $expectedArguments = '--app="https://example.com/cli?view=large#/home" --start-maximized'
             if ($CommandCase -ceq 'OpenWithProfile') { $expectedArguments += ' --profile-directory="Profile 1"' }
@@ -214,6 +223,21 @@ try {
     Assert-Cli ((Get-EeaStateProfile (Read-EeaManifest $profileContext 'CLI website')) -ceq '') 'An explicitly empty profile must restore Edge-controlled selection.'
     $null = Invoke-CliCase UnattendedOpen $profileDirectory
     Write-Host 'PASS: Public profile override, saved-profile launch, explicit clearing, and unsafe-profile rejection.'
+
+    $sessionDirectory = Join-Path $testRoot 'Fresh sessions'
+    $sessionContext = New-CliContext $sessionDirectory
+    $null = Invoke-CliCase InvalidSessionMode $sessionDirectory -ExpectedExit 1
+    $null = Invoke-CliCase SessionModeOnOpen $sessionDirectory -ExpectedExit 1
+    Assert-Cli (-not [IO.Directory]::Exists($sessionDirectory)) 'Invalid or misplaced session options must fail before creating app data.'
+    $null = Invoke-CliCase InstallFreshSession $sessionDirectory
+    Assert-Cli ((Get-EeaStateFreshSession (Read-EeaManifest $sessionContext 'CLI website'))) 'Install must forward the explicit fresh-session option.'
+    $null = Invoke-CliCase OpenFreshSession $sessionDirectory
+    $null = Invoke-CliCase Install $sessionDirectory
+    Assert-Cli ((Get-EeaStateFreshSession (Read-EeaManifest $sessionContext 'CLI website'))) 'A subsequent Install without a session option must preserve fresh sessions.'
+    $null = Invoke-CliCase InstallNormalSession $sessionDirectory
+    Assert-Cli (-not (Get-EeaStateFreshSession (Read-EeaManifest $sessionContext 'CLI website'))) 'An explicit Normal option must restore persistent browsing.'
+    $null = Invoke-CliCase OpenWithProfile $sessionDirectory
+    Write-Host 'PASS: Public fresh-session opt-in, no-argument launch routing, preservation, explicit opt-out, and invalid-option rejection.'
 
     Assert-Cli ((Invoke-CliCase ImportPreview $destinationDirectory $standardFile).Contains('Add')) 'Import preview must return structured changes.'
     $null = Invoke-CliCase ImportWhatIf $destinationDirectory $standardFile

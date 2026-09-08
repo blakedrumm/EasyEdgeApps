@@ -244,6 +244,35 @@ try {
     Assert-ToolGui ($domainForm.Tag.Grid.Rows[0].Cells['Status'].Value -like '*DOMAIN CHANGE*' -and $domainForm.Tag.Grid.Rows[0].Tag.Description.Contains($kit.Apps[0].Url)) 'Destination changes need an explicit label and exact previous address.'
     Write-Host 'PASS: Read-only import preview, declined/approved import, per-app results, idempotence, and domain-change warning.'
 
+    $sessionContext = New-ToolTestContext 'Fresh session imports'
+    $sessionKit = ConvertFrom-EeaJson ($kit | ConvertTo-Json -Depth 8)
+    $sessionKit.SchemaVersion = 2
+    $sessionKit.Apps[0].Name = 'Fresh News'
+    $sessionKit.Apps[0] | Add-Member -NotePropertyName FreshSession -NotePropertyValue $true
+    $normalApp = ConvertFrom-EeaJson ($sessionKit.Apps[0] | ConvertTo-Json -Depth 8)
+    $normalApp.Name = 'Persistent News'
+    $normalApp.FreshSession = $false
+    $sessionKit.Apps = @($sessionKit.Apps[0], $normalApp)
+    $sessionForm = New-EeaSelectionForm -Mode Import -Kit $sessionKit -Context $sessionContext
+    Show-ToolTestForm $sessionForm
+    $sessionForm.Tag.AllCheck.Checked = $true
+    $sessionForm.Tag.Grid.Rows[1].Cells[0].Value = $false
+    $sessionForm.Tag.ApplyButton.PerformClick()
+    Assert-ToolGui ($sessionForm.Tag.Result.Completed -and @(Get-EeaApps -Context $sessionContext).Count -eq 1 -and (Get-EeaStateFreshSession (Read-EeaManifest $sessionContext 'Fresh News'))) 'A selected GUI subset must preserve schema 2 and its fresh-session choice without installing unselected websites.'
+    $sessionKit.Apps = @($sessionKit.Apps[0])
+    $sessionKit.Apps[0].FreshSession = $false
+    $disableSessionForm = New-EeaSelectionForm -Mode Import -Kit $sessionKit -Context $sessionContext
+    Show-ToolTestForm $disableSessionForm
+    Assert-ToolGui ($disableSessionForm.Tag.Grid.Rows[0].Tag.Description.Contains('FRESH SESSIONS DISABLED')) 'GUI kit preview must disclose a requested return to persistent browsing.'
+    $disableSessionForm.Tag.AllCheck.Checked = $true
+    $script:ApproveChange = $false
+    $disableSessionForm.Tag.ApplyButton.PerformClick()
+    Assert-ToolGui ((Get-EeaStateFreshSession (Read-EeaManifest $sessionContext 'Fresh News'))) 'Declining a kit privacy change must keep fresh sessions enabled.'
+    $script:ApproveChange = $true
+    $disableSessionForm.Tag.ApplyButton.PerformClick()
+    Assert-ToolGui ($disableSessionForm.Tag.Result.Completed -and -not (Get-EeaStateFreshSession (Read-EeaManifest $sessionContext 'Fresh News'))) 'An approved kit privacy change must apply explicitly.'
+    Write-Host 'PASS: Selected version-2 GUI imports preserve fresh sessions and disclose explicit opt-out before approval.'
+
     $installedPaths = Get-EeaPaths $destination 'Family News'
     [IO.File]::Delete($installedPaths.Desktop)
     $checkForm = New-EeaSelectionForm -Mode Check -Context $destination

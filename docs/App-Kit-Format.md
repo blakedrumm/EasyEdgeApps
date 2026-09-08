@@ -1,6 +1,6 @@
 # App Kit Format
 
-This is the version 1 App Kit contract introduced in Easy Edge Apps 1.1.0. The application remains a self-contained PowerShell script, available portably or inside the optional MSI added in 1.3.0; website icon retrieval uses embedded SVG dependencies as well as Windows/.NET. The same portable data works in Windows PowerShell 5.1 and PowerShell 7 on Windows. Encrypted exports remain experimental and require independent security review before production use.
+This documents App Kit schema 1 (introduced in Easy Edge Apps 1.1.0) and schema 2 (introduced in 1.3.2 for fresh-session choices). The application remains a self-contained PowerShell script, available portably or inside the optional MSI added in 1.3.0; website icon retrieval uses embedded SVG dependencies as well as Windows/.NET. The same portable data works in Windows PowerShell 5.1 and PowerShell 7 on Windows. Encrypted exports remain experimental and require independent security review before production use.
 
 ## Standard payload
 
@@ -25,18 +25,19 @@ A standard kit is a UTF-8 JSON object. A leading UTF-8 BOM is accepted for files
 }
 ```
 
-Required kit fields are `Product`, `SchemaVersion`, `Name`, and `Apps`. Required app fields are `Name`, `Url`, `Desktop`, `StartMenu`, and `Icon`. `Notes` is the only optional field at either level and defaults to an empty string. Field names, product markers, and enum values are case-sensitive. Unknown fields, duplicate JSON fields (including case-only variants), and type metadata are rejected. There are no imported paths or commands.
+Required kit fields are `Product`, `SchemaVersion`, `Name`, and `Apps`. Required app fields are `Name`, `Url`, `Desktop`, `StartMenu`, and `Icon`. Optional `Notes` defaults to an empty string at either level. Schema 2 additionally permits an optional Boolean `FreshSession` on each app, defaulting to false; schema 1 rejects that field. Field names, product markers, and enum values are case-sensitive. Unknown fields, duplicate JSON fields (including case-only variants), and type metadata are rejected. There are no imported paths or commands.
 
 Version 1.3.0 does not change this schema. Global preferences, update timestamps, diagnostic logs, installer registration, and Edge profile identifiers are not portable kit fields. A local app manifest may store an optional validated `EdgeProfile`, but exports omit it and kits containing that field are rejected. An import preserves an existing app's local profile; newly created apps use the destination user's default. Kit Desktop/Start menu choices remain authoritative for placement.
 
 | Field | Validation |
 | --- | --- |
 | Product | Exact string `EasyEdgeApps.AppKit` |
-| SchemaVersion | Integer `1`, not a string, Boolean, or decimal value |
+| SchemaVersion | Integer `1` or `2`, not a string, Boolean, or decimal value |
 | Name | String, trimmed and normalized to Unicode Form C; 1 to 60 UTF-16 code units; safe Windows shortcut name, no hidden controls, path separators, reserved device names, or trailing dot |
 | Apps | JSON array with 1 to 100 app objects; unique case-insensitive, normalized name identities |
 | Url | String containing an absolute, well-formed HTTPS or HTTP address; no embedded credentials, whitespace/control/format characters, quotes, or backslashes; original and canonical address at most 2048 characters |
 | Desktop, StartMenu | Actual JSON Booleans; at least one true |
+| FreshSession | Schema 2 only; actual JSON Boolean, default false; never a string, number, or null |
 | Notes | Plain string, at most 4000 UTF-16 code units; hidden controls/format characters rejected; CR, LF, and TAB allowed; never executed or rendered as markup |
 
 URL hosts are canonicalized with `Uri`/`UriBuilder` and IDN ASCII host representation. Query strings and fragments are preserved subject to normal URI canonicalization. Exact canonical URL equality determines Favorites duplicates; app identity remains based on the normalized name. Kit notes are shown during import but are not a separate persisted kit catalog. App notes are saved with each installed app.
@@ -44,6 +45,34 @@ URL hosts are canonicalized with `Uri`/`UriBuilder` and IDN ASCII host represent
 HTTP URLs are supported starting in application version 1.2.0; older application versions reject kits containing them. HTTP is unencrypted. Import preserves the explicitly supplied scheme without network probing or automatic upgrade. The payload schema remains version 1, and existing HTTPS-only kits are unchanged.
 
 Payload JSON files and compact canonical payloads are limited to 16 MiB. JSON reading uses the bounded .NET JSON reader, preserving strings such as date-looking notes rather than coercing them into runtime dates. App Kit nesting is limited to 16 reader levels and 4096 values, counted in a streaming pass before constructing objects. Edge metadata uses separate limits of 256 reader levels and 250,000 values; Favorites traversal additionally limits the bar to 10,000 entries/folders and 64 levels. Malformed UTF-8, trailing commas, comments, duplicate fields, and unsupported scalar values are rejected before domain validation.
+
+## Fresh-session choices
+
+Exports with at least one fresh website use schema 2, which requires application 1.3.2 or later. All-normal exports remain schema 1. A complete schema-2 example is:
+
+```json
+{
+  "Product": "EasyEdgeApps.AppKit",
+  "SchemaVersion": 2,
+  "Name": "Shared websites",
+  "Apps": [
+    {
+      "Name": "Shared News",
+      "Url": "https://example.com/news",
+      "Desktop": true,
+      "StartMenu": true,
+      "FreshSession": true,
+      "Icon": { "Kind": "Generated", "Version": 1 }
+    }
+  ]
+}
+```
+
+Schema 2 applies each app's session choice explicitly. Missing `FreshSession` canonicalizes to false and can therefore disable an existing destination's fresh sessions. The preview discloses a return to persistent browsing; normal approval or reviewed unattended approval is required. Selected GUI/CLI subsets preserve their source schema. Schema 1 imports retain an existing app's local session choice and default new apps to normal browsing.
+
+Only this Boolean is portable. Temporary profiles, executable bytes, source, hashes, paths, normal Edge profile identifiers, and browser data are never included. Import generates the launcher locally using the destination's Edge path and platform compiler. Local fresh-app manifests also use schema 2, but have a separate nonportable contract with executable/source hashes; they are not App Kits. Older applications reject schema 2 rather than weaken privacy silently.
+
+The encrypted envelope remains version 1 and authenticates either complete inner payload schema. Its algorithms, KDF, bounds, and associated-data bytes do not change. See [fresh-session boundaries](../SECURITY.md#fresh-session-boundaries) for cleanup and sign-in limits.
 
 ## Portable icons
 
@@ -126,7 +155,7 @@ Only after successful authentication and decryption does the tool parse the UTF-
 
 Export computes the selected representation in memory and stages only that representation beside the destination. A protected export never stages the readable payload. A new destination uses no-overwrite movement; replacement requires explicit approval, a checked prior-file hash, and the existing same-directory atomic replacement helper. Failure attempts cleanup of only the created staging file. Exceptional filesystem failures can still prevent cleanup.
 
-Unlocking creates no decrypted kit file. After approval, installation intentionally writes ordinary cleartext app settings and direct `.lnk` shortcuts through the existing owned-file transaction path. Secrets are never appropriate in URLs or notes. There is no password storage, plaintext fallback, auto-login, or website probing.
+Unlocking creates no decrypted kit file. After approval, installation intentionally writes ordinary cleartext app settings, `.lnk` shortcuts, and any locally generated fresh-session launcher through the existing owned-file transaction path. Secrets are never appropriate in URLs or notes. There is no password storage, plaintext fallback, auto-login, or website probing.
 
 Imports do not remove apps absent from a kit. Identical normalized app definitions with healthy owned files are unchanged. Each selected batch is fully validated and preflighted, then rechecked under the current-user/current-session mutex. Each app has staged writes and caught-error rollback; earlier successful apps remain after a later failure. Recovery, cross-session races, and power-loss limitations are unchanged.
 

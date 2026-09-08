@@ -148,7 +148,7 @@ try {
     Test-KitCase 'Entire kit validation rejects unsafe data before installation' {
         foreach ($mutation in @(
             { param($candidate) $candidate.SchemaVersion = '1' },
-            { param($candidate) $candidate.SchemaVersion = 2 },
+            { param($candidate) $candidate.SchemaVersion = 3 },
             { param($candidate) $candidate.Apps[0].Desktop = 'false' },
             { param($candidate) $candidate.Apps[0].Url = 'ftp://example.com/' },
             { param($candidate) $candidate.Apps[0].Name = '..\Outside' },

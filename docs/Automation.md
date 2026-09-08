@@ -1,6 +1,6 @@
 # Command-Line Automation
 
-These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.3.1. Unattended commands and selected kit imports remain compatible with version 1.2.0; per-app launch-profile overrides require 1.3.0. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
+These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.3.2. Unattended commands and selected kit imports remain compatible with version 1.2.0; per-app launch-profile overrides require 1.3.0, and fresh-session choices require 1.3.2. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
 
 Run as the Windows user whose shortcuts you intend to manage, not as SYSTEM, an administrator, or a different helper account. The portable application is still one script; the optional MSI installs that same script and a graphical manager launcher. No module, service, or scheduled task is installed. Automate the script directly, not the MSI launcher, which accepts no forwarded options.
 
@@ -46,7 +46,7 @@ Choose proposed names from `ListFavorites`, which may differ from bookmark title
 
 | Action | Selection and options | Unattended result |
 | --- | --- | --- |
-| `Install` | `-Name`, `-Url`; optional `-IconPath`, `-Notes`, `-EdgeProfile`, `-NoDesktop`, `-NoStartMenu`, `-Launch` | Saved name, URL, and placement |
+| `Install` | `-Name`, `-Url`; optional `-IconPath`, `-Notes`, `-EdgeProfile`, `-SessionMode`, `-NoDesktop`, `-NoStartMenu`, `-Launch` | Saved name, URL, and placement |
 | `List` | All saved apps | Name, URL, and placement per app |
 | `ExportKit` | `-Path`; optional `-AppNames`, `-KitName`, `-Notes`, `-Replace`, password options | Destination, protection flag, app count |
 | `ImportKit` | `-Path`; optional `-AppNames`, `-Password`, `-Preview` | Preview rows or per-app application results |
@@ -76,6 +76,27 @@ Only the exact identifiers `Default`, `Profile ` followed by one to six digits, 
 An explicit value overrides the app's saved choice. Without `-EdgeProfile`, an existing app retains its profile and a new app uses the default from Settings. Repair and Open use the stored profile. App Kits never contain profile identifiers; existing imported apps retain their choice and newly imported apps use the destination user's default. Kit placement remains controlled by the kit. The Settings placement defaults affect the main new-website editor, not CLI `-NoDesktop`/`-NoStartMenu` behavior.
 
 `-EdgeUserDataPath` remains a discovery source for Setup and Favorites commands, not a browser launch destination. Automatic update checking is confined to setup; command-line operations do not contact the update service. The opt-in diagnostic file is not a CLI transcript, so protect any separate automation logs and JSON output.
+
+## Fresh sessions
+
+Install accepts `-SessionMode Fresh` or `-SessionMode Normal`. Omission preserves an existing website's choice; new websites default to Normal. This option is not accepted by Open or other actions: Open always uses the saved mode.
+
+```powershell
+# Start this website with an empty independent profile on every launch.
+.\EasyEdgeApps.ps1 -Action Install -Name 'Shared website' -Url 'https://example.com/' -SessionMode Fresh -Unattended
+.\EasyEdgeApps.ps1 -Action Open -Name 'Shared website' -Unattended
+
+# Explicitly restore persistent browsing for the same website.
+.\EasyEdgeApps.ps1 -Action Install -Name 'Shared website' -Url 'https://example.com/' -SessionMode Normal -Unattended
+```
+
+`-Unattended` approves the mode change, including returning to persistent storage. `-WhatIf` does not compile a launcher or create app data. An omitted or explicit `-EdgeProfile` is still saved normally but is not used while Fresh is enabled; disabling Fresh restores that normal-profile choice.
+
+Fresh launches use a locally compiled, no-argument Windows executable, not a PowerShell session. It creates a unique temporary Edge profile each time and removes that profile after its browser process tree ends. Cookies, cache, and site data are not reused across launches. Normal Edge data and downloaded files remain; sign-ins may need repeating, and OS/site SSO is not disabled. Persistent cleanup failures show a warning and leave marked data for retry on a later fresh launch, never for reuse. This is not secure erasure.
+
+Saving, importing, and repairing Fresh websites require the Windows .NET Framework compiler. Browsing requires a non-elevated interactive user session. A `UserDataDir` policy override or application-control restriction can block launch; there is no policy bypass or normal-profile fallback. Close fresh windows before updating/removing the website. CLI Open returns after starting the launcher, not after browsing or cleanup; exit 0 is not proof of session completion.
+
+Exports containing any fresh website use kit schema 2, which requires 1.3.2 or later. Schema 2 applies each stored Boolean choice, including false; preview and review before unattended import. Schema 1 preserves existing destination session choices, defaults new apps to Normal, and remains the export format for entirely normal kits. No executable, source, browser data, or local profile selection travels. Taskbar pins must be recreated from the new owned shortcut after a mode change; directly pinning Edge can bypass freshness.
 
 ## Process invocation
 

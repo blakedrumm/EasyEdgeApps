@@ -185,6 +185,16 @@ function Test-GuiWebsiteIcon {
     Complete-EeaWebsiteIconLookup $Form
     Assert-Gui ((Read-EeaManifest $Context 'My News').Notes -ceq $savedNotes -and -not $ui.StatusLabel.Text.StartsWith('Saved:')) 'Edits made during resolution must not be saved by an older pending action.'
     $ui.NotesInput.Text = $savedNotes
+    $savedSessionChoice = Get-EeaStateFreshSession (Read-EeaManifest $Context 'My News')
+    $ui.UrlInput.Text = $bareWebsite
+    $script:NextIconRequest = New-GuiIconRequest $iconData -ResolvedWebsite $originalUrl
+    $request = $script:NextIconRequest
+    $ui.SaveButton.PerformClick()
+    $ui.FreshSessionCheck.Checked = -not $savedSessionChoice
+    $request.AsyncResult.IsCompleted = $true
+    Complete-EeaWebsiteIconLookup $Form
+    Assert-Gui ((Get-EeaStateFreshSession (Read-EeaManifest $Context 'My News')) -eq $savedSessionChoice -and -not $ui.StatusLabel.Text.StartsWith('Saved:')) 'Changing the privacy choice during address resolution must invalidate the pending save.'
+    $ui.FreshSessionCheck.Checked = $savedSessionChoice
     $previousApproval = $script:ApproveChange
     try {
         $script:ApproveChange = $false
@@ -423,6 +433,7 @@ try {
     $ui = $form.Tag
     Assert-Gui (-not (Test-Path -LiteralPath $context.Root)) 'Opening setup must not create app data.'
     Assert-Gui (-not $ui.PinButton.Enabled) 'Taskbar pinning must remain unavailable until a saved website is selected.'
+    Assert-Gui (-not $ui.FreshSessionCheck.Checked -and $ui.FreshSessionCheck.AccessibleDescription.Contains('cookies, cache') -and $ui.FreshSessionCheck.Image.Tag -ceq 'Privacy') 'Fresh sessions must be an accessible, clearly described opt-in website setting.'
     $ui.PinButton.PerformClick()
     Assert-Gui ($script:ExplorerRequests.Count -eq 0) 'The disabled pin command must not open Explorer.'
     Test-GuiSpaceRenderer
@@ -505,6 +516,21 @@ try {
     $ui.UrlInput.Text = 'https://example.com/updated#/home'
     $ui.SaveButton.PerformClick()
     Assert-Gui ((Read-EeaManifest $context 'My News').Url -eq 'https://example.com/updated#/home') 'Save changes must update the website.'
+    $ui.FreshSessionCheck.Checked = $true
+    $ui.SaveButton.PerformClick()
+    Assert-Gui (-not (Get-EeaStateFreshSession (Read-EeaManifest $context 'My News'))) 'Declining the session-mode confirmation must preserve normal browsing.'
+    $script:ApproveChange = $true
+    $ui.SaveButton.PerformClick()
+    Assert-Gui ((Get-EeaStateFreshSession (Read-EeaManifest $context 'My News')) -and $ui.FreshSessionCheck.Checked) 'Approved fresh-session changes must persist and reload into the editor.'
+    $ui.NewButton.PerformClick()
+    Assert-Gui (-not $ui.FreshSessionCheck.Checked) 'New websites must not inherit another website session choice.'
+    $ui.AppList.SelectedIndex = 0
+    Assert-Gui ($ui.FreshSessionCheck.Checked) 'Selecting a saved fresh-session website must restore its checkbox.'
+    $ui.FreshSessionCheck.Checked = $false
+    $ui.SaveButton.PerformClick()
+    Assert-Gui (-not (Get-EeaStateFreshSession (Read-EeaManifest $context 'My News'))) 'Approved opt-out must restore the ordinary launch path.'
+    $script:ApproveChange = $false
+    Write-Host 'PASS: Fresh-session opt-in, declined/approved mode changes, saved selection, reset, and opt-out.'
     $ui.RemoveButton.PerformClick()
     Assert-Gui ($ui.AppList.Items.Count -eq 1) 'Declining removal must keep the saved website.'
     Assert-Gui ($null -ne (Read-EeaManifest $context 'My News')) 'Declining removal must keep saved settings.'
@@ -520,7 +546,15 @@ try {
         Assert-ControlLayout $form
         $brandBounds = $form.RectangleToClient($ui.BrandPicture.RectangleToScreen($ui.BrandPicture.ClientRectangle))
         Assert-Gui ($form.ClientRectangle.Contains($brandBounds)) 'The application logo must stay visible at large text sizes.'
-        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.PinButton, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+        if ($pointSize -eq 12) {
+            $ui.EditorViewport.AutoScrollPosition = New-Object Drawing.Point(0, 0)
+            [Windows.Forms.Application]::DoEvents()
+            foreach ($control in @($ui.FreshSessionCheck, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+                $bounds = $ui.EditorViewport.RectangleToClient($control.RectangleToScreen($control.ClientRectangle))
+                Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($bounds)) ('Default layout must show the privacy choice and website actions without scrolling: ' + $control.Text)
+            }
+        }
+        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.PinButton, $ui.FreshSessionCheck, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
             $ui.EditorViewport.ScrollControlIntoView($requiredControl)
             [Windows.Forms.Application]::DoEvents()
             $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))

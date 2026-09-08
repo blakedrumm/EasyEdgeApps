@@ -39,6 +39,14 @@ For Install, use Default or Profile followed by a space and up to six digits to
 choose a local Edge profile. An explicitly empty value lets Edge choose. Without
 an override, existing apps retain their saved profile and new apps use Settings.
 For Favorites actions, this selects the local profile to read, not a launch profile.
+.PARAMETER SessionMode
+For Install, Fresh creates a Windows launcher that uses an empty temporary Edge
+profile on every launch and removes its cookies, cache, and site data after that
+browser process tree exits. Normal restores persistent browsing. Omit this option
+to retain an existing website's choice; new websites default to Normal.
+Crash or file-lock leftovers are never reused; a later fresh launch retries cleanup.
+Normal Edge profile data and downloaded files are not cleared. Fresh sessions
+require non-elevated Windows and the Windows .NET Framework compiler at setup.
 .EXAMPLE
 .\EasyEdgeApps.ps1
 
@@ -64,7 +72,7 @@ Back up the current user's saved websites for a replacement computer. Exports al
 
 Restore only My Mail from a previously reviewed, trusted App Kit. Adds or updates that named app for the current Windows user and leaves unselected apps alone. -Unattended approves the selected changes without prompts but retains validation and ownership checks. Run with -Preview first to review destinations without installing. Sign in to the website separately after restoring its shortcuts.
 .NOTES
-Version: 1.3.1
+Version: 1.3.2
 Author: Blake Drumm (blakedrumm@microsoft.com)
 Created: 2026-09-07
 Last Modified: 2026-09-08
@@ -85,6 +93,8 @@ param(
     [ValidateNotNullOrEmpty()]
     [string[]]$AppNames,
     [string]$EdgeProfile,
+    [ValidateSet('Normal', 'Fresh')]
+    [string]$SessionMode,
     [string]$EdgeUserDataPath = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'),
     [switch]$Protected,
     [Security.SecureString]$Password,
@@ -269,6 +279,352 @@ function Get-EeaByteHash {
     finally { $hasher.Dispose() }
 }
 
+function Get-EeaSessionLauncherSource {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Website, [Parameter(Mandatory = $true)][string]$EdgePath)
+
+    $cleanWebsite = ConvertTo-EeaWebsite $Website
+    if (-not [IO.Path]::IsPathRooted($EdgePath) -or [IO.Path]::GetFileName($EdgePath) -ine 'msedge.exe' -or $EdgePath -match '["\r\n]') { throw 'The Edge executable path is invalid.' }
+    $source = @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+[assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
+
+public static class EeaFreshSession
+{
+    private const string Marker = "EasyEdgeApps.FreshSession:1";
+    private const string MarkerFile = ".eea-session";
+
+    [STAThread]
+    private static int Main(string[] arguments)
+    {
+        try
+        {
+            if (arguments.Length != 0) throw new InvalidOperationException("Unexpected launcher arguments.");
+            string edge = Encoding.UTF8.GetString(Convert.FromBase64String("__EEA_EDGE__"));
+            string website = Encoding.UTF8.GetString(Convert.FromBase64String("__EEA_URL__"));
+            string root = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "Sessions");
+            if (!Run(root, edge, website))
+            {
+                MessageBox.Show("Some temporary website data could not be removed. It will never be reused. Cleanup will be retried next time this website opens.", "Easy Edge Apps", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return 2;
+            }
+            return 0;
+        }
+        catch
+        {
+            MessageBox.Show("The fresh session could not start or finish safely. No normal-profile fallback was requested. Ask your helper to check Edge, browser policies, and this website's saved shortcuts.", "Easy Edge Apps", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+    }
+
+    public static void CheckPolicy()
+    {
+        foreach (RegistryView view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        foreach (RegistryHive hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser })
+        using (RegistryKey baseKey = RegistryKey.OpenBaseKey(hive, view))
+        foreach (string suffix in new[] { "", "\\Recommended" })
+        using (RegistryKey key = baseKey.OpenSubKey("Software\\Policies\\Microsoft\\Edge" + suffix))
+        {
+            if (key != null && key.GetValue("UserDataDir", null, RegistryValueOptions.DoNotExpandEnvironmentNames) != null)
+                throw new InvalidOperationException("Edge UserDataDir policy prevents a verified isolated profile.");
+        }
+    }
+
+    public static void CheckPath(string path)
+    {
+        for (string current = Path.GetFullPath(path); !String.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+        {
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Session paths must not contain reparse points.");
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+        }
+    }
+
+    private static string JobName(string directory)
+    {
+        return "Local\\EasyEdgeApps-Fresh-" + Path.GetFileName(directory);
+    }
+
+    public static string CreateSession(string root)
+    {
+        FileStream lease;
+        string directory = CreateSession(root, out lease);
+        lease.Dispose();
+        return directory;
+    }
+
+    public static string CreateSession(string root, out FileStream lease)
+    {
+        CheckPath(root);
+        Directory.CreateDirectory(root);
+        string directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
+        if (Directory.Exists(directory) || File.Exists(directory)) throw new IOException("Session identity collision.");
+        Directory.CreateDirectory(directory);
+        lease = new FileStream(Path.Combine(directory, MarkerFile), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        try
+        {
+            byte[] data = Encoding.ASCII.GetBytes(Marker);
+            lease.Write(data, 0, data.Length);
+            lease.Flush(true);
+        }
+        catch { lease.Dispose(); throw; }
+        return directory;
+    }
+
+    private static void CheckTree(string directory)
+    {
+        CheckPath(directory);
+        foreach (string entry in Directory.GetFileSystemEntries(directory))
+        {
+            CheckPath(entry);
+            if (Directory.Exists(entry)) CheckTree(entry);
+        }
+    }
+
+    private static bool JobIsActive(string directory)
+    {
+        IntPtr job = OpenJobObject(4, false, JobName(directory));
+        if (job == IntPtr.Zero)
+        {
+            if (Marshal.GetLastWin32Error() == 2) return false;
+            return true;
+        }
+        try
+        {
+            AccountingInformation accounting;
+            if (!QueryInformationJobObject(job, 1, out accounting, (uint)Marshal.SizeOf(typeof(AccountingInformation)), IntPtr.Zero)) return true;
+            return accounting.ActiveProcesses != 0;
+        }
+        finally { CloseHandle(job); }
+    }
+
+    public static bool TryCleanup(string root, string directory)
+    {
+        try
+        {
+            root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+            directory = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar);
+            if (!String.Equals(Path.GetDirectoryName(directory), root, StringComparison.OrdinalIgnoreCase) ||
+                !Regex.IsMatch(Path.GetFileName(directory), "\\A[a-f0-9]{32}\\z")) return false;
+            if (!Directory.Exists(directory)) return true;
+            if (!directory.StartsWith(@"\\?\", StringComparison.Ordinal))
+                directory = directory.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + directory.Substring(2) : @"\\?\" + directory;
+            CheckPath(directory);
+            string markerPath = Path.Combine(directory, MarkerFile);
+            CheckPath(markerPath);
+            using (FileStream marker = new FileStream(markerPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                if (marker.Length != Marker.Length) return false;
+                using (StreamReader reader = new StreamReader(marker, Encoding.ASCII, false, 128, true))
+                    if (reader.ReadToEnd() != Marker) return false;
+                if (JobIsActive(directory)) return false;
+                CheckTree(directory);
+                foreach (string entry in Directory.GetFileSystemEntries(directory))
+                {
+                    if (String.Equals(entry, markerPath, StringComparison.OrdinalIgnoreCase)) continue;
+                    CheckPath(entry);
+                    if (Directory.Exists(entry)) Directory.Delete(entry, true);
+                    else File.Delete(entry);
+                }
+            }
+            File.Delete(markerPath);
+            Directory.Delete(directory, false);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    public static bool CleanupAfterExit(string root, string directory)
+    {
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            if (TryCleanup(root, directory)) return true;
+            if (attempt < 49) System.Threading.Thread.Sleep(100);
+        }
+        return false;
+    }
+
+    public static string Arguments(string website, string directory)
+    {
+        Uri address;
+        if (website.Length > 2048 || !Uri.TryCreate(website, UriKind.Absolute, out address) ||
+            (address.Scheme != "https" && address.Scheme != "http") || address.UserInfo.Length != 0 ||
+            Regex.IsMatch(website, "[\\s\\p{Cc}\\p{Cf}\"\\\\]")) throw new InvalidOperationException("Invalid session website.");
+        if (!Path.IsPathRooted(directory) || directory.IndexOf('"') >= 0) throw new InvalidOperationException("Invalid session directory.");
+        return "--app=\"" + website + "\" --start-maximized --user-data-dir=\"" + directory +
+            "\" --no-first-run --no-default-browser-check --disable-background-mode";
+    }
+
+    public static bool Run(string root, string executable, string website)
+    {
+        using (System.Security.Principal.WindowsIdentity identity = System.Security.Principal.WindowsIdentity.GetCurrent())
+        {
+            if (identity.IsSystem || new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+                throw new InvalidOperationException("Fresh sessions require a non-elevated user session.");
+        }
+        CheckPolicy();
+        CheckPath(root);
+        if (!File.Exists(executable)) throw new FileNotFoundException("Edge is unavailable.");
+        if (Directory.Exists(root))
+            foreach (string previous in Directory.GetDirectories(root)) TryCleanup(root, previous);
+        FileStream lease;
+        string directory = CreateSession(root, out lease);
+        try
+        {
+            using (lease)
+                RunProcess(executable, Arguments(website, Path.Combine(directory, "Profile")), directory);
+        }
+        finally
+        {
+            CleanupAfterExit(root, directory);
+        }
+        return !Directory.Exists(directory);
+    }
+
+    public static void RunProcess(string executable, string arguments, string directory)
+    {
+        IntPtr job = IntPtr.Zero;
+        IntPtr completion = IntPtr.Zero;
+        ProcessInformation process = new ProcessInformation();
+        bool assigned = false;
+        try
+        {
+            job = CreateJobObject(IntPtr.Zero, JobName(directory));
+            if (job == IntPtr.Zero || Marshal.GetLastWin32Error() == 183) throw new Win32Exception();
+            ExtendedLimitInformation limits = new ExtendedLimitInformation();
+            limits.Basic.LimitFlags = 0x2000;
+            if (!SetJobLimits(job, 9, ref limits, (uint)Marshal.SizeOf(typeof(ExtendedLimitInformation)))) throw new Win32Exception();
+            completion = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+            if (completion == IntPtr.Zero) throw new Win32Exception();
+            CompletionInformation association = new CompletionInformation();
+            association.Key = new IntPtr(1);
+            association.Port = completion;
+            if (!SetJobCompletion(job, 7, ref association, (uint)Marshal.SizeOf(typeof(CompletionInformation)))) throw new Win32Exception();
+            StartupInformation startup = new StartupInformation();
+            startup.Size = Marshal.SizeOf(typeof(StartupInformation));
+            StringBuilder command = new StringBuilder("\"" + executable + "\" " + arguments);
+            if (!CreateProcess(executable, command, IntPtr.Zero, IntPtr.Zero, false, 4, IntPtr.Zero, Path.GetDirectoryName(executable), ref startup, out process)) throw new Win32Exception();
+            if (!AssignProcessToJobObject(job, process.Process)) throw new Win32Exception();
+            assigned = true;
+            if (ResumeThread(process.Thread) == UInt32.MaxValue) throw new Win32Exception();
+            for (;;)
+            {
+                uint message;
+                UIntPtr key;
+                IntPtr overlapped;
+                if (!GetQueuedCompletionStatus(completion, out message, out key, out overlapped, UInt32.MaxValue)) throw new Win32Exception();
+                if (message == 4 && key.ToUInt64() == 1) break;
+            }
+        }
+        finally
+        {
+            if (process.Process != IntPtr.Zero && !assigned) TerminateProcess(process.Process, 1);
+            if (process.Thread != IntPtr.Zero) CloseHandle(process.Thread);
+            if (process.Process != IntPtr.Zero) CloseHandle(process.Process);
+            if (job != IntPtr.Zero) CloseHandle(job);
+            if (completion != IntPtr.Zero) CloseHandle(completion);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AccountingInformation
+    {
+        public long UserTime, KernelTime, PeriodUserTime, PeriodKernelTime;
+        public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicLimitInformation
+    {
+        public long ProcessTime, JobTime;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSet, MaximumWorkingSet;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters { public ulong ReadOperations, WriteOperations, OtherOperations, ReadBytes, WriteBytes, OtherBytes; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ExtendedLimitInformation
+    {
+        public BasicLimitInformation Basic;
+        public IoCounters Counters;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemory, PeakJobMemory;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CompletionInformation { public IntPtr Key, Port; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInformation
+    {
+        public int Size;
+        public string Reserved, Desktop, Title;
+        public uint X, Y, Width, Height, CharacterWidth, CharacterHeight, FillAttribute, Flags;
+        public ushort ShowWindow, ReservedSize;
+        public IntPtr ReservedData, StandardInput, StandardOutput, StandardError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation { public IntPtr Process, Thread; public uint ProcessId, ThreadId; }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", EntryPoint = "SetInformationJobObject", SetLastError = true)]
+    private static extern bool SetJobLimits(IntPtr job, int informationClass, ref ExtendedLimitInformation information, uint length);
+    [DllImport("kernel32.dll", EntryPoint = "SetInformationJobObject", SetLastError = true)]
+    private static extern bool SetJobCompletion(IntPtr job, int informationClass, ref CompletionInformation information, uint length);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(IntPtr job, int informationClass, out AccountingInformation information, uint length, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateIoCompletionPort(IntPtr file, IntPtr existing, UIntPtr key, uint threads);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetQueuedCompletionStatus(IntPtr port, out uint bytes, out UIntPtr key, out IntPtr overlapped, uint milliseconds);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcess(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory, ref StartupInformation startup, out ProcessInformation process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll")]
+    private static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+}
+'@
+    return $source.Replace('__EEA_EDGE__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($EdgePath))).Replace('__EEA_URL__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cleanWebsite)))
+}
+
+function Write-EeaSessionLauncher {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Website, [Parameter(Mandatory = $true)][string]$EdgePath)
+
+    Assert-EeaSafePath $Path
+    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not [IO.File]::Exists($compiler)) { throw 'Fresh sessions require the Windows .NET Framework compiler.' }
+    $sourcePath = Join-Path ([IO.Path]::GetDirectoryName($Path)) ('session-' + [Guid]::NewGuid().ToString('N') + '.cs')
+    try {
+        [IO.File]::WriteAllText($sourcePath, (Get-EeaSessionLauncherSource -Website $Website -EdgePath $EdgePath), (New-Object Text.UTF8Encoding($false)))
+        $compilerOutput = & $compiler /nologo /target:winexe /platform:x64 /optimize+ ('/out:' + $Path) /reference:System.Windows.Forms.dll $sourcePath 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($Path)) { throw 'The fresh-session launcher could not be compiled. No shortcut was changed.' }
+    }
+    finally { if ([IO.File]::Exists($sourcePath)) { [IO.File]::Delete($sourcePath) } }
+}
+
 function Get-EeaArguments {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Website, [AllowEmptyString()][string]$EdgeProfile = '')
@@ -288,12 +644,38 @@ function Get-EeaStateProfile {
     return ConvertTo-EeaProfileDirectory $State.EdgeProfile
 }
 
+function Get-EeaStateFreshSession {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$State)
+
+    if ($null -eq $State.PSObject.Properties['FreshSession']) { return $false }
+    if ($State.FreshSession -isnot [bool]) { throw 'The fresh-session setting is invalid.' }
+    return $State.FreshSession
+}
+
+function Assert-EeaSessionLauncher {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Paths, $State, [switch]$AllowMissing)
+
+    Assert-EeaSafePath $Paths.Launcher
+    $freshSession = $null -ne $State -and (Get-EeaStateFreshSession $State)
+    if (-not (Test-Path -LiteralPath $Paths.Launcher)) {
+        if ($freshSession -and -not $AllowMissing) { throw 'The fresh-session launcher is missing. Use Check and Repair before opening this website.' }
+        return
+    }
+    if (-not $freshSession -or -not [IO.File]::Exists($Paths.Launcher) -or
+        (Get-Item -LiteralPath $Paths.Launcher -Force).Length -gt 2MB -or
+        (Get-FileHash -LiteralPath $Paths.Launcher -Algorithm SHA256).Hash.ToLowerInvariant() -cne $State.LauncherHash) {
+        throw 'The session launcher was changed outside Easy Edge Apps. Nothing was changed; ask your helper to check it.'
+    }
+}
+
 function Write-EeaShortcut {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$Target,
-        [Parameter(Mandatory = $true)][string]$Arguments,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Arguments,
         [Parameter(Mandatory = $true)][string]$Description,
         [Parameter(Mandatory = $true)][string]$Icon
     )
@@ -358,7 +740,7 @@ function Get-EeaVersion {
     [CmdletBinding()]
     param()
 
-    return [version]'1.3.1'
+    return [version]'1.3.2'
 }
 
 function New-EeaSettings {
@@ -535,6 +917,7 @@ function Get-EeaPaths {
         Directory = $appDirectory
         Manifest = Join-Path $appDirectory 'app.json'
         Icon = Join-Path $appDirectory 'icon.ico'
+        Launcher = Join-Path $appDirectory 'fresh-session.exe'
         Desktop = Join-Path $Context.Desktop ($cleanName + '.lnk')
         StartMenu = Join-Path $Context.Programs ($cleanName + '.lnk')
     }
@@ -786,7 +1169,7 @@ function Read-EeaManifest {
         foreach ($propertyName in @('Product', 'SchemaVersion', 'Id', 'Name', 'Url', 'Desktop', 'StartMenu', 'EdgePath', 'IconHash')) {
             if ($null -eq $state.PSObject.Properties[$propertyName]) { throw 'A required setting is missing.' }
         }
-        if ($state.Product -cne 'EasyEdgeApps' -or $state.SchemaVersion -ne 1 -or
+        if ($state.Product -cne 'EasyEdgeApps' -or $state.SchemaVersion -isnot [int] -or $state.SchemaVersion -notin @(1, 2) -or
             $state.Id -cne $paths.Id -or (Get-EeaId $state.Name) -cne $paths.Id -or
             $state.Name -cne (ConvertTo-EeaName $state.Name) -or
             $state.Url -cne (ConvertTo-EeaWebsite $state.Url) -or
@@ -801,6 +1184,13 @@ function Read-EeaManifest {
             ($state.Notes -isnot [string] -or $state.Notes -cne (ConvertTo-EeaNotes $state.Notes))) { throw 'Invalid helper notes.' }
         if ($null -ne $state.PSObject.Properties['IconKind'] -and $state.IconKind -cnotin @('Generated', 'Custom')) { throw 'Invalid icon kind.' }
         $null = Get-EeaStateProfile $state
+        $freshSession = Get-EeaStateFreshSession $state
+        if ($freshSession -ne ($state.SchemaVersion -eq 2)) { throw 'Invalid session schema version.' }
+        if ($freshSession) {
+            foreach ($field in @('LauncherHash', 'LauncherSourceHash')) {
+                if ($null -eq $state.PSObject.Properties[$field] -or $state.$field -isnot [string] -or $state.$field -cnotmatch '\A[a-f0-9]{64}\z') { throw 'Invalid session launcher identity.' }
+            }
+        }
         return $state
     }
     catch {
@@ -842,9 +1232,12 @@ function Test-EeaOwnedShortcut {
     Assert-EeaSafePath $Path
     if (-not [IO.File]::Exists($Path)) { return $false }
     $shortcut = Read-EeaShortcut $Path
+    $freshSession = Get-EeaStateFreshSession $State
+    $expectedArguments = if ($freshSession) { '' } else { Get-EeaArguments $State.Url -EdgeProfile (Get-EeaStateProfile $State) }
+    $expectedTarget = if ($freshSession) { $Paths.Launcher } else { $State.EdgePath }
     return ($shortcut.Description -ceq ('EasyEdgeApps:' + $State.Id) -and
-        $shortcut.Arguments -ceq (Get-EeaArguments $State.Url -EdgeProfile (Get-EeaStateProfile $State)) -and
-        [StringComparer]::OrdinalIgnoreCase.Equals($shortcut.TargetPath, $State.EdgePath) -and
+        $shortcut.Arguments -ceq $expectedArguments -and
+        [StringComparer]::OrdinalIgnoreCase.Equals($shortcut.TargetPath, $expectedTarget) -and
         [StringComparer]::OrdinalIgnoreCase.Equals($shortcut.IconLocation, ($Paths.Icon + ',0')))
 }
 
@@ -852,6 +1245,7 @@ function Assert-EeaOwnership {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Paths, $State, [bool]$Desktop, [bool]$StartMenu)
 
+    Assert-EeaSessionLauncher -Paths $Paths -State $State -AllowMissing
     foreach ($slot in @('Desktop', 'StartMenu')) {
         $previouslyOwned = $null -ne $State -and [bool]$State.$slot
         $requested = if ($slot -eq 'Desktop') { $Desktop } else { $StartMenu }
@@ -1761,6 +2155,7 @@ function Install-EeaApp {
         [switch]$GenerateIcon,
         [AllowEmptyString()][string]$Notes,
         [AllowEmptyString()][string]$EdgeProfile,
+        [bool]$FreshSession = $false,
         [bool]$Desktop = $true,
         [bool]$StartMenu = $true,
         $Context = (Get-EeaContext)
@@ -1770,6 +2165,7 @@ function Install-EeaApp {
     $cleanWebsite = ConvertTo-EeaWebsite $Website
     $notesProvided = $PSBoundParameters.ContainsKey('Notes')
     $profileProvided = $PSBoundParameters.ContainsKey('EdgeProfile')
+    $freshSessionProvided = $PSBoundParameters.ContainsKey('FreshSession')
     if ($notesProvided) { $Notes = ConvertTo-EeaNotes $Notes }
     if ($profileProvided) { $EdgeProfile = ConvertTo-EeaProfileDirectory $EdgeProfile }
     if (@(@([bool]$CustomIcon, ($null -ne $IconData), [bool]$GenerateIcon) | Where-Object { $_ }).Count -gt 1) { throw 'Choose one icon source.' }
@@ -1786,6 +2182,7 @@ function Install-EeaApp {
         Assert-EeaOwnership -Paths $paths -State $previousState -Desktop $Desktop -StartMenu $StartMenu
         $savedNotes = if ($notesProvided) { $Notes } elseif ($null -ne $previousState -and $null -ne $previousState.PSObject.Properties['Notes']) { $previousState.Notes } else { '' }
         $savedProfile = if ($profileProvided) { $EdgeProfile } elseif ($null -ne $previousState) { Get-EeaStateProfile $previousState } else { (Get-EeaSettings -Context $Context).DefaultEdgeProfile }
+        $savedFreshSession = if ($freshSessionProvided) { $FreshSession } elseif ($null -ne $previousState) { Get-EeaStateFreshSession $previousState } else { $false }
         Invoke-EeaTransaction -Context $Context -Prepare {
             param($StagePath)
             $stagedIcon = Join-Path $StagePath 'icon.ico'
@@ -1810,12 +2207,28 @@ function Install-EeaApp {
                 Notes = $savedNotes
             }
             if ($savedProfile) { $newState | Add-Member -NotePropertyName EdgeProfile -NotePropertyValue $savedProfile }
+            $shortcutTarget = $edgePath
+            $shortcutArguments = Get-EeaArguments $cleanWebsite -EdgeProfile $savedProfile
+            if ($savedFreshSession) {
+                $stagedLauncher = Join-Path $StagePath 'fresh-session.exe'
+                Write-EeaSessionLauncher -Path $stagedLauncher -Website $cleanWebsite -EdgePath $edgePath
+                $newState.SchemaVersion = 2
+                $newState | Add-Member -NotePropertyName FreshSession -NotePropertyValue $true
+                $newState | Add-Member -NotePropertyName LauncherHash -NotePropertyValue (Get-FileHash -LiteralPath $stagedLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
+                $newState | Add-Member -NotePropertyName LauncherSourceHash -NotePropertyValue (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes((Get-EeaSessionLauncherSource -Website $cleanWebsite -EdgePath $edgePath))))
+                $shortcutTarget = $paths.Launcher
+                $shortcutArguments = ''
+                [pscustomobject]@{ Path = $paths.Launcher; Source = $stagedLauncher }
+            }
+            elseif ($null -ne $previousState -and (Get-EeaStateFreshSession $previousState)) {
+                [pscustomobject]@{ Path = $paths.Launcher; Source = $null }
+            }
             [pscustomobject]@{ Path = $paths.Icon; Source = $stagedIcon }
             foreach ($slot in @('Desktop', 'StartMenu')) {
                 $selected = if ($slot -eq 'Desktop') { $Desktop } else { $StartMenu }
                 if ($selected) {
                     $stagedShortcut = Join-Path $StagePath ($slot + '.lnk')
-                    Write-EeaShortcut -Path $stagedShortcut -Target $edgePath -Arguments (Get-EeaArguments $cleanWebsite -EdgeProfile $savedProfile) -Description ('EasyEdgeApps:' + $paths.Id) -Icon ($paths.Icon + ',0')
+                    Write-EeaShortcut -Path $stagedShortcut -Target $shortcutTarget -Arguments $shortcutArguments -Description ('EasyEdgeApps:' + $paths.Id) -Icon ($paths.Icon + ',0')
                     [pscustomobject]@{ Path = $paths.$slot; Source = $stagedShortcut }
                 }
                 elseif ($null -ne $previousState -and $previousState.$slot) {
@@ -1848,6 +2261,7 @@ function Remove-EeaApp {
                 if ($state.$slot) { [pscustomobject]@{ Path = $paths.$slot; Source = $null } }
             }
             [pscustomobject]@{ Path = $paths.Icon; Source = $null }
+            if (Get-EeaStateFreshSession $state) { [pscustomobject]@{ Path = $paths.Launcher; Source = $null } }
             [pscustomobject]@{ Path = $paths.Manifest; Source = $null }
         }
         foreach ($directory in @($paths.Directory, $paths.AppsRoot, $Context.Programs, $Context.Root)) {
@@ -1867,6 +2281,7 @@ function Show-EeaTaskbarShortcut {
     $state = Read-EeaManifest $Context $AppName
     if ($null -eq $state) { throw 'Save this website before pinning it to the taskbar.' }
     $paths = Get-EeaPaths $Context $state.Name
+    if (Get-EeaStateFreshSession $state) { Assert-EeaSessionLauncher -Paths $paths -State $state }
     $shortcutPath = $null
     foreach ($slot in @('StartMenu', 'Desktop')) {
         if (-not $state.$slot) { continue }
@@ -1893,8 +2308,15 @@ function Start-EeaApp {
     $state = Read-EeaManifest $Context $AppName
     if ($null -eq $state) { throw 'This website has not been added yet.' }
     $edgePath = Find-EeaEdge
+    $freshSession = Get-EeaStateFreshSession $state
+    if ($freshSession) {
+        $paths = Get-EeaPaths $Context $state.Name
+        Assert-EeaSessionLauncher -Paths $paths -State $state
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($edgePath, $state.EdgePath)) { throw 'Edge has moved. Use Check and Repair before opening this fresh-session website.' }
+    }
     if ($PSCmdlet.ShouldProcess($state.Name, 'Open website in Microsoft Edge')) {
-        Start-Process -FilePath $edgePath -ArgumentList (Get-EeaArguments $state.Url -EdgeProfile (Get-EeaStateProfile $state)) -ErrorAction Stop
+        if ($freshSession) { Start-Process -FilePath $paths.Launcher -ErrorAction Stop }
+        else { Start-Process -FilePath $edgePath -ArgumentList (Get-EeaArguments $state.Url -EdgeProfile (Get-EeaStateProfile $state)) -ErrorAction Stop }
     }
 }
 
@@ -1931,8 +2353,8 @@ function ConvertTo-EeaKit {
 
     Assert-EeaFields $Value @('Product', 'SchemaVersion', 'Name', 'Apps') @('Notes')
     if ($Value.Product -isnot [string] -or $Value.Product -cne 'EasyEdgeApps.AppKit' -or ($Value.SchemaVersion -isnot [int] -and $Value.SchemaVersion -isnot [long]) -or
-        $Value.SchemaVersion -ne 1 -or $Value.Name -isnot [string] -or $Value.Apps -isnot [Array] -or
-        $Value.Apps.Count -lt 1 -or $Value.Apps.Count -gt 100) { throw 'Use a version 1 App Kit containing between 1 and 100 apps.' }
+        $Value.SchemaVersion -notin @(1, 2) -or $Value.Name -isnot [string] -or $Value.Apps -isnot [Array] -or
+        $Value.Apps.Count -lt 1 -or $Value.Apps.Count -gt 100) { throw 'Use a version 1 or 2 App Kit containing between 1 and 100 apps.' }
     $kitName = ConvertTo-EeaName $Value.Name
     $kitNotes = ''
     if ($null -ne $Value.PSObject.Properties['Notes']) {
@@ -1943,7 +2365,8 @@ function ConvertTo-EeaKit {
     $apps = New-Object 'Collections.Generic.List[object]'
     $iconCharacters = 0L
     foreach ($app in $Value.Apps) {
-        Assert-EeaFields $app @('Name', 'Url', 'Desktop', 'StartMenu', 'Icon') @('Notes')
+        $optionalFields = if ($Value.SchemaVersion -eq 2) { @('Notes', 'FreshSession') } else { @('Notes') }
+        Assert-EeaFields $app @('Name', 'Url', 'Desktop', 'StartMenu', 'Icon') $optionalFields
         if ($app.Name -isnot [string] -or $app.Url -isnot [string] -or $app.Desktop -isnot [bool] -or $app.StartMenu -isnot [bool] -or
             (-not $app.Desktop -and -not $app.StartMenu)) { throw 'An App Kit name, website address, or shortcut placement is invalid.' }
         $cleanName = ConvertTo-EeaName $app.Name
@@ -1971,9 +2394,11 @@ function ConvertTo-EeaKit {
             $icon = [pscustomobject]@{ Kind = 'Embedded'; Data = $app.Icon.Data; Sha256 = $app.Icon.Sha256 }
         }
         else { throw 'Unsupported portable icon kind.' }
-        $apps.Add([pscustomobject][ordered]@{ Name = $cleanName; Url = $cleanUrl; Desktop = $app.Desktop; StartMenu = $app.StartMenu; Notes = $appNotes; Icon = $icon })
+        $portableApp = [pscustomobject][ordered]@{ Name = $cleanName; Url = $cleanUrl; Desktop = $app.Desktop; StartMenu = $app.StartMenu; Notes = $appNotes; Icon = $icon }
+        if ($Value.SchemaVersion -eq 2) { $portableApp | Add-Member -NotePropertyName FreshSession -NotePropertyValue (Get-EeaStateFreshSession $app) }
+        $apps.Add($portableApp)
     }
-    $kit = [pscustomobject][ordered]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = 1; Name = $kitName; Notes = $kitNotes; Apps = $apps.ToArray() }
+    $kit = [pscustomobject][ordered]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = [int]$Value.SchemaVersion; Name = $kitName; Notes = $kitNotes; Apps = $apps.ToArray() }
     if ([Text.Encoding]::UTF8.GetByteCount(($kit | ConvertTo-Json -Depth 8 -Compress)) -gt 16MB) { throw 'The App Kit payload exceeds 16 MB.' }
     return $kit
 }
@@ -1994,7 +2419,9 @@ function ConvertTo-EeaKitApp {
     $icon = if ($generated) { [pscustomobject]@{ Kind = 'Generated'; Version = 1 } }
         else { [pscustomobject]@{ Kind = 'Embedded'; Data = [Convert]::ToBase64String($iconBytes); Sha256 = $State.IconHash } }
     $notes = if ($null -ne $State.PSObject.Properties['Notes']) { $State.Notes } else { '' }
-    return [pscustomobject]@{ Name = $State.Name; Url = $State.Url; Desktop = $State.Desktop; StartMenu = $State.StartMenu; Notes = $notes; Icon = $icon }
+    $app = [pscustomobject]@{ Name = $State.Name; Url = $State.Url; Desktop = $State.Desktop; StartMenu = $State.StartMenu; Notes = $notes; Icon = $icon }
+    if (Get-EeaStateFreshSession $State) { $app | Add-Member -NotePropertyName FreshSession -NotePropertyValue $true }
+    return $app
 }
 
 function New-EeaKit {
@@ -2010,7 +2437,8 @@ function New-EeaKit {
         $apps = @($apps | Where-Object { $selectedIds -ccontains $_.Id })
     }
     $portableApps = @($apps | ForEach-Object { ConvertTo-EeaKitApp -State $_ -Context $Context })
-    return ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = 1; Name = $KitName; Notes = $Notes; Apps = $portableApps })
+    $schemaVersion = if (@($portableApps | Where-Object { Get-EeaStateFreshSession $_ }).Count -gt 0) { 2 } else { 1 }
+    return ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = $schemaVersion; Name = $KitName; Notes = $Notes; Apps = $portableApps })
 }
 
 function Get-EeaChecks {
@@ -2069,6 +2497,10 @@ function Get-EeaChecks {
             if (-not [IO.File]::Exists($paths.Icon)) { $issues.Add('Recreate missing icon as an automatic letter icon. Import a trusted kit to restore a custom icon.') }
             else { $null = Read-EeaCustomIcon $paths.Icon }
             if ($edgePath -and -not [StringComparer]::OrdinalIgnoreCase.Equals($state.EdgePath, $edgePath)) { $issues.Add('Update owned shortcuts to the current Edge executable.') }
+            if (Get-EeaStateFreshSession $state) {
+                if (-not [IO.File]::Exists($paths.Launcher)) { $issues.Add('Recreate the missing fresh-session launcher.') }
+                elseif ($edgePath -and $state.LauncherSourceHash -cne (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes((Get-EeaSessionLauncherSource -Website $state.Url -EdgePath $edgePath))))) { $issues.Add('Update the owned fresh-session launcher.') }
+            }
             if ($issues.Count -gt 0) { $status = 'Repairable' }
         }
         catch { $status = 'Conflict'; $issues.Add($_.Exception.Message) }
@@ -2088,7 +2520,7 @@ function Get-EeaAppSnapshot {
 
     $parts = New-Object 'Collections.Generic.List[string]'
     $parts.Add($EdgePath)
-    foreach ($slot in @('Manifest', 'Icon', 'Desktop', 'StartMenu')) {
+    foreach ($slot in @('Manifest', 'Icon', 'Launcher', 'Desktop', 'StartMenu')) {
         $path = $Paths.$slot
         Assert-EeaSafePath $path
         $value = if ([IO.File]::Exists($path)) { (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash }
@@ -2126,13 +2558,18 @@ function Get-EeaKitPreview {
                 $oldNotes = if ($null -ne $state.PSObject.Properties['Notes']) { $state.Notes } else { '' }
                 $sameIcon = if ($app.Icon.Kind -ceq 'Embedded') { $state.IconHash -ceq $app.Icon.Sha256 }
                     else { $null -ne $state.PSObject.Properties['IconKind'] -and $state.IconKind -ceq 'Generated' }
+                $sameSession = $validated.SchemaVersion -eq 1 -or (Get-EeaStateFreshSession $state) -eq (Get-EeaStateFreshSession $app)
                 $action = 'Update'
                 $detail = if ($domainChanged) { 'DESTINATION DOMAIN CHANGES. Review both addresses before approving.' }
                     elseif ($state.Url -cne $app.Url) { 'Website address changes. Review both addresses before approving.' }
                     else { 'Update notes, icon, placement, or missing owned files.' }
                 if ($state.Url -ceq $app.Url -and $state.Desktop -eq $app.Desktop -and $state.StartMenu -eq $app.StartMenu -and
-                    $oldNotes -ceq $app.Notes -and $sameIcon -and $check.Status -eq 'Healthy') { $action = 'Unchanged'; $detail = 'Already matches this kit.' }
+                    $oldNotes -ceq $app.Notes -and $sameIcon -and $sameSession -and $check.Status -eq 'Healthy') { $action = 'Unchanged'; $detail = 'Already matches this kit.' }
+                if (-not $sameSession) {
+                    $detail += if (Get-EeaStateFreshSession $app) { ' FRESH SESSIONS ENABLED. Sign in on every launch.' } else { ' FRESH SESSIONS DISABLED. Browser data will persist in the normal profile.' }
+                }
             }
+            elseif (Get-EeaStateFreshSession $app) { $detail = 'Create shortcuts with fresh sessions. Sign in on every launch.' }
             $snapshot = Get-EeaAppSnapshot -Paths $paths -EdgePath $edgePath
         }
         catch { $action = 'Conflict'; $detail = $_.Exception.Message }
@@ -2184,6 +2621,7 @@ function Import-EeaKit {
                     try {
                         $app = $row.App
                         $installParameters = @{ AppName = $app.Name; Website = $app.Url; Desktop = $app.Desktop; StartMenu = $app.StartMenu; Notes = $app.Notes; Context = $Context; Confirm = $false }
+                        if ($validated.SchemaVersion -eq 2) { $installParameters.FreshSession = Get-EeaStateFreshSession $app }
                         if ($app.Icon.Kind -ceq 'Embedded') { $installParameters.IconData = ConvertFrom-EeaBase64 $app.Icon.Data -MaximumBytes 1MB }
                         else { $installParameters.GenerateIcon = $true }
                         $null = Install-EeaApp @installParameters
@@ -2214,7 +2652,8 @@ function Repair-EeaApps {
         }
     }
     $apps = @($checks | ForEach-Object { ConvertTo-EeaKitApp -State $_.State -Context $Context -AutomaticIfMissing })
-    $kit = ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = 1; Name = 'Repair selected apps'; Notes = ''; Apps = $apps })
+    $schemaVersion = if (@($apps | Where-Object { Get-EeaStateFreshSession $_ }).Count -gt 0) { 2 } else { 1 }
+    $kit = ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = $schemaVersion; Name = 'Repair selected apps'; Notes = ''; Apps = $apps })
     $repairPreview = @(Get-EeaKitPreview -Kit $kit -Context $Context)
     for ($checkIndex = 0; $checkIndex -lt $checks.Count; $checkIndex++) {
         if ($checks[$checkIndex].Snapshot -cne $repairPreview[$checkIndex].Snapshot) { throw 'The setup changed during the check. Check Apps again before repairing.' }
@@ -3495,6 +3934,7 @@ function Start-EeaEditorWebsiteLookup {
         [pscustomobject]@{
             Name = $ui.NameInput.Text; Notes = $ui.NotesInput.Text
             Desktop = $ui.DesktopCheck.Checked; StartMenu = $ui.StartMenuCheck.Checked; CustomIcon = $ui.CustomIcon
+            FreshSession = $ui.FreshSessionCheck.Checked
         }
     } else { $null }
     $ui.IconRequest = Start-EeaWebsiteIconRequest -Website $ui.UrlInput.Text -ResolveOnly:$ResolveOnly
@@ -3531,7 +3971,8 @@ function Complete-EeaWebsiteIconLookup {
             $pendingSave = $ui.PendingWebsiteSave
             if ($request.ResolveOnly -and $null -ne $pendingSave) {
                 $resumeSave = $ui.NameInput.Text -ceq $pendingSave.Name -and $ui.NotesInput.Text -ceq $pendingSave.Notes -and
-                    $ui.DesktopCheck.Checked -eq $pendingSave.Desktop -and $ui.StartMenuCheck.Checked -eq $pendingSave.StartMenu -and $ui.CustomIcon -ceq $pendingSave.CustomIcon
+                    $ui.DesktopCheck.Checked -eq $pendingSave.Desktop -and $ui.StartMenuCheck.Checked -eq $pendingSave.StartMenu -and $ui.CustomIcon -ceq $pendingSave.CustomIcon -and
+                    $ui.FreshSessionCheck.Checked -eq $pendingSave.FreshSession
                 if (-not $resumeSave) { $ui.StatusLabel.Text += ' Unsaved changes remain in the editor.' }
             }
         }
@@ -3570,6 +4011,7 @@ function Reset-EeaEditor {
     $ui.NotesInput.Clear()
     $ui.DesktopCheck.Checked = $ui.Settings.DefaultDesktop
     $ui.StartMenuCheck.Checked = $ui.Settings.DefaultStartMenu
+    $ui.FreshSessionCheck.Checked = $false
     $ui.CustomIcon = $null
     $ui.WebsiteIconData = $null
     $ui.WebsiteIconUrl = $null
@@ -3890,9 +4332,9 @@ function New-EeaSetupForm {
     $editor.AutoSize = $true
     $editor.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $editor.ColumnCount = 1
-    $editor.RowCount = 10
+    $editor.RowCount = 11
     [void]$editor.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
-    for ($rowIndex = 0; $rowIndex -lt 10; $rowIndex++) {
+    for ($rowIndex = 0; $rowIndex -lt 11; $rowIndex++) {
         [void]$editor.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     }
     $editorViewport.Controls.Add($editor)
@@ -3931,7 +4373,7 @@ function New-EeaSetupForm {
     $notesInput.AcceptsReturn = $true
     $notesInput.ScrollBars = [Windows.Forms.ScrollBars]::Vertical
     $notesInput.Dock = [Windows.Forms.DockStyle]::Top
-    $notesInput.Height = 88
+    $notesInput.Height = 64
     $notesInput.MaxLength = 4000
     $notesInput.AccessibleName = 'Plain-text helper notes'
     $notesInput.TabIndex = 5
@@ -3956,10 +4398,21 @@ function New-EeaSetupForm {
     $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck, $pinButton))
     $editor.Controls.Add($placement, 0, 6)
 
+    $freshSessionCheck = New-EeaCheckBox 'Fresh &session each time' -Icon Privacy
+    $freshSessionCheck.Dock = [Windows.Forms.DockStyle]::Top
+    $freshSessionCheck.TabIndex = 7
+    $freshSessionCheck.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 4)
+    $freshSessionCheck.AccessibleName = 'Fresh session for this website'
+    $freshSessionCheck.AccessibleDescription = 'Each launch starts with an empty, separate Edge profile. Its cookies, cache, and site data are removed after its windows and browser processes close. You may need to sign in again. Crash or file-lock leftovers are never reused; later launches retry cleanup. Normal Edge data and downloaded files stay unchanged.'
+    $sessionToolTip = New-Object Windows.Forms.ToolTip
+    $sessionToolTip.SetToolTip($freshSessionCheck, $freshSessionCheck.AccessibleDescription)
+    $freshSessionCheck.Add_Disposed({ param($Sender, $EventArgs) $sessionToolTip.Dispose() }.GetNewClosure())
+    $editor.Controls.Add($freshSessionCheck, 0, 7)
+
     $iconPanel = New-Object ($uiNamespace + '.SpaceFlowLayoutPanel')
     $iconPanel.AutoSize = $true
     $iconPanel.Dock = [Windows.Forms.DockStyle]::Fill
-    $iconPanel.TabIndex = 7
+    $iconPanel.TabIndex = 8
     $iconPreview = New-Object Windows.Forms.PictureBox
     $iconPreview.Size = New-Object Drawing.Size(48, 48)
     $iconPreview.SizeMode = [Windows.Forms.PictureBoxSizeMode]::Zoom
@@ -3978,17 +4431,17 @@ function New-EeaSetupForm {
     $iconButton = New-EeaButton 'Choose &icon...' -Icon Image
     $clearIconButton = New-EeaButton 'Use &saved icon' -Icon Image
     $iconPanel.Controls.AddRange([Windows.Forms.Control[]]@($iconPreview, $activitySpinner, $getIconButton, $cancelIconButton, $iconButton, $clearIconButton))
-    $editor.Controls.Add($iconPanel, 0, 7)
+    $editor.Controls.Add($iconPanel, 0, 8)
     $iconLabel = New-EeaLabel -Icon Image
     $iconLabel.AutoSize = $true
     $iconLabel.Text = 'Automatic'
     $iconLabel.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 16)
-    $editor.Controls.Add($iconLabel, 0, 8)
+    $editor.Controls.Add($iconLabel, 0, 9)
 
     $actions = New-Object ($uiNamespace + '.SpaceFlowLayoutPanel')
     $actions.AutoSize = $true
     $actions.Dock = [Windows.Forms.DockStyle]::Top
-    $actions.TabIndex = 8
+    $actions.TabIndex = 9
     $saveButton = New-EeaButton '&Add website' -Icon Add
     Set-EeaPrimaryButton $saveButton
     $openButton = New-EeaButton '&Open' -Icon Open
@@ -3996,7 +4449,7 @@ function New-EeaSetupForm {
     $openButton.Enabled = $false
     $removeButton.Enabled = $false
     $actions.Controls.AddRange([Windows.Forms.Control[]]@($saveButton, $openButton, $removeButton))
-    $editor.Controls.Add($actions, 0, 9)
+    $editor.Controls.Add($actions, 0, 10)
 
     $statusLabel = New-EeaLabel -Icon Info
     $statusLabel.AutoSize = $true
@@ -4043,6 +4496,7 @@ function New-EeaSetupForm {
     $form.Tag = [pscustomobject]@{
         Context = $Context; AppList = $appList; NameInput = $nameInput; UrlInput = $urlInput; NotesInput = $notesInput
         DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck; PinButton = $pinButton; CustomIcon = $null
+        FreshSessionCheck = $freshSessionCheck
         WebsiteIconData = $null; WebsiteIconUrl = $null; IconRequest = $null; IconTimer = $iconTimer; CloseAfterIconLookup = $false
         PendingWebsiteSave = $null; UpdatingWebsite = $false
         ActivitySpinner = $activitySpinner
@@ -4107,6 +4561,7 @@ function New-EeaSetupForm {
         $ui.NotesInput.Text = if ($null -ne $selected.PSObject.Properties['Notes']) { $selected.Notes } else { '' }
         $ui.DesktopCheck.Checked = $selected.Desktop
         $ui.StartMenuCheck.Checked = $selected.StartMenu
+        $ui.FreshSessionCheck.Checked = Get-EeaStateFreshSession $selected
         $ui.CustomIcon = $null
         $ui.WebsiteIconData = $null
         $ui.WebsiteIconUrl = $null
@@ -4180,15 +4635,22 @@ function New-EeaSetupForm {
                 return
             }
             if ($website -match '^http://' -and -not (Confirm-EeaChange $ownerForm 'This website uses unencrypted HTTP. Do not send passwords or sensitive information over this connection. Save this address?' 'Save HTTP website?')) { return }
-            if ($ui.AppList.SelectedIndex -lt 0 -and $null -ne (Read-EeaManifest $ui.Context $cleanName)) {
+            $previousState = Read-EeaManifest $ui.Context $cleanName
+            if ($ui.AppList.SelectedIndex -lt 0 -and $null -ne $previousState) {
                 if (-not (Confirm-EeaChange $ownerForm ('Replace the address and shortcut settings for "' + $cleanName + '"?') 'Update existing website?')) { return }
+            }
+            $previousFreshSession = $null -ne $previousState -and (Get-EeaStateFreshSession $previousState)
+            if ($ui.FreshSessionCheck.Checked -ne $previousFreshSession) {
+                $message = if ($ui.FreshSessionCheck.Checked) { 'Start this website with an empty temporary Edge profile every time? Sign-ins, cookies, cache, and site data from each session are removed after its browser processes close. A crash or locked files can leave data for later cleanup; it is never reused. Normal Edge profiles and downloaded files are not cleared.' }
+                    else { 'Return this website to normal browsing? Cookies, cache, and sign-ins can persist in its normal Edge profile.' }
+                if (-not (Confirm-EeaChange $ownerForm $message 'Change website session mode?')) { return }
             }
             if ($null -ne $ui.WebsiteIconData -and (ConvertTo-EeaWebsite $ui.UrlInput.Text) -cne $ui.WebsiteIconUrl) { throw 'The website address changed. Retrieve its icon again before saving.' }
             $ownerForm.UseWaitCursor = $true
             $ui.SaveButton.Enabled = $false
             $ui.StatusLabel.Text = 'Saving...'
             $ui.StatusLabel.Refresh()
-            $installed = Install-EeaApp -AppName $cleanName -Website $website -Notes $ui.NotesInput.Text -CustomIcon $ui.CustomIcon -IconData $ui.WebsiteIconData -Desktop $ui.DesktopCheck.Checked -StartMenu $ui.StartMenuCheck.Checked -Context $ui.Context -Confirm:$false
+            $installed = Install-EeaApp -AppName $cleanName -Website $website -Notes $ui.NotesInput.Text -CustomIcon $ui.CustomIcon -IconData $ui.WebsiteIconData -Desktop $ui.DesktopCheck.Checked -StartMenu $ui.StartMenuCheck.Checked -FreshSession $ui.FreshSessionCheck.Checked -Context $ui.Context -Confirm:$false
             Update-EeaForm -Form $ownerForm -SelectName $installed.Name
             $ui.StatusLabel.Text = 'Saved: ' + $installed.Name
             Write-EeaDebugLog -Event AppSaved -Settings $ui.Settings -Context $ui.Context
@@ -5019,7 +5481,7 @@ function New-EeaSelectionForm {
                 $ui.Result = Import-EeaKit -Kit $kit -NewOnly -Context $ui.Context -Confirm:$false
             }
             elseif ($ui.Mode -eq 'Import') {
-                $kit = ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = 1; Name = $ui.Kit.Name; Notes = $ui.Kit.Notes; Apps = @($selected | ForEach-Object { $_.App }) })
+                $kit = ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = $ui.Kit.SchemaVersion; Name = $ui.Kit.Name; Notes = $ui.Kit.Notes; Apps = @($selected | ForEach-Object { $_.App }) })
                 $ui.Result = Import-EeaKit -Kit $kit -ExpectedPreview $selected -Context $ui.Context -Confirm:$false
             }
             else { $ui.Result = Repair-EeaApps -AppNames @($selected | ForEach-Object { $_.Name }) -ExpectedChecks $selected -Context $ui.Context -Confirm:$false }
@@ -5060,7 +5522,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ($env:OS -ne 'Windows_NT') { throw 'Easy Edge Apps needs Windows and Microsoft Edge.' }
         if (-not $PSBoundParameters.ContainsKey('Action') -and $Name -and $Url) { $Action = 'Install' }
         $actionOptions = @{
-            Setup = @('EdgeUserDataPath'); Install = @('Name', 'Url', 'IconPath', 'Notes', 'EdgeProfile', 'NoDesktop', 'NoStartMenu', 'Launch')
+            Setup = @('EdgeUserDataPath'); Install = @('Name', 'Url', 'IconPath', 'Notes', 'EdgeProfile', 'SessionMode', 'NoDesktop', 'NoStartMenu', 'Launch')
             List = @(); Remove = @('Name'); Open = @('Name')
             ExportKit = @('Path', 'KitName', 'Notes', 'AppNames', 'Protected', 'Password', 'PasswordConfirmation', 'Replace')
             ImportKit = @('Path', 'AppNames', 'Password', 'Preview'); Check = @('Name', 'AppNames'); Repair = @('Name', 'AppNames', 'Preview')
@@ -5098,6 +5560,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $installOptions = @{ AppName = $Name; Website = $Url; CustomIcon = $IconPath; Desktop = (-not $NoDesktop); StartMenu = (-not $NoStartMenu) }
                 if ($PSBoundParameters.ContainsKey('Notes')) { $installOptions.Notes = $Notes }
                 if ($PSBoundParameters.ContainsKey('EdgeProfile')) { $installOptions.EdgeProfile = $EdgeProfile }
+                if ($PSBoundParameters.ContainsKey('SessionMode')) { $installOptions.FreshSession = $SessionMode -eq 'Fresh' }
                 $installedApp = Install-EeaApp @installOptions
                 if ($null -ne $installedApp) {
                     if (-not $Quiet) { Write-Host ('Saved website shortcuts: ' + $installedApp.Name) }
