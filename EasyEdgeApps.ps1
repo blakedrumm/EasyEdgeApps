@@ -65,6 +65,9 @@ Back up the current user's saved websites for a replacement computer. Exports al
 Restore only My Mail from a previously reviewed, trusted App Kit. Adds or updates that named app for the current Windows user and leaves unselected apps alone. -Unattended approves the selected changes without prompts but retains validation and ownership checks. Run with -Preview first to review destinations without installing. Sign in to the website separately after restoring its shortcuts.
 .NOTES
 Version: 1.3.1
+Author: Blake Drumm (blakedrumm@microsoft.com)
+Created: 2026-09-07
+Last Modified: 2026-09-08
 .LINK
 https://github.com/blakedrumm/EasyEdgeApps
 #>

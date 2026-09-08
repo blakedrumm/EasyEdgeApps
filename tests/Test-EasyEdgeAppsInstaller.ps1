@@ -56,6 +56,20 @@ try {
     $properties = @{}
     foreach ($row in @(Read-MsiRows $database 'SELECT `Property`, `Value` FROM `Property`' @('Name', 'Value'))) { $properties[$row.Name] = $row.Value }
     Assert-Installer ($properties.ProductName -ceq 'Easy Edge Apps' -and $properties.ProductVersion -ceq (Get-EeaVersion).ToString(3)) 'MSI branding and version must match the application.'
+    $expectedAuthor = 'Blake Drumm (blakedrumm@microsoft.com)'
+    $scriptHelp = Get-Help (Join-Path $projectRoot 'EasyEdgeApps.ps1') -Full | Out-String -Width 4096
+    Assert-Installer ($scriptHelp.Contains('Author: ' + $expectedAuthor)) 'Script help notes must include the full author name and email.'
+    $licenseRows = @(Read-MsiRows $database "SELECT ``Text`` FROM ``Control`` WHERE ``Dialog_`` = 'WelcomeEulaDlg' AND ``Control`` = 'LicenseText'" @('Text'))
+    Assert-Installer ($licenseRows.Count -eq 1) 'The installer must contain one visible license agreement.'
+    Add-Type -AssemblyName System.Windows.Forms
+    $licenseBox = New-Object Windows.Forms.RichTextBox
+    try {
+        $licenseBox.Rtf = $licenseRows[0].Text
+        $sourceLicense = [IO.File]::ReadAllText((Join-Path $projectRoot 'LICENSE'))
+        Assert-Installer ($licenseBox.Text.Contains($expectedAuthor)) 'The installer license agreement must include the full author name and email.'
+        Assert-Installer ($licenseBox.Text.Replace("`r`n", "`n").TrimEnd() -ceq $sourceLicense.Replace("`r`n", "`n").TrimEnd()) 'The rendered installer agreement must retain the complete project license.'
+    }
+    finally { $licenseBox.Dispose() }
     Assert-Installer (-not $properties.ContainsKey('ALLUSERS') -or -not $properties.ALLUSERS) 'The MSI must install for the current user, not for the machine.'
     Assert-Installer (-not $properties.ContainsKey('ARPSYSTEMCOMPONENT') -or $properties.ARPSYSTEMCOMPONENT -ne '1') 'The installed application must not be hidden from Installed Apps.'
     Assert-Installer ($properties.UpgradeCode -ceq '{9D0AF71A-353C-4A88-A171-16249356093F}') 'The upgrade identity must remain stable across releases.'
@@ -71,7 +85,7 @@ try {
     Assert-Installer (@($customActions | Where-Object { ([int]$_.Type -band 63) -notin @(1, 51) }).Count -eq 0) 'The MSI must not execute PowerShell, scripts, downloaded installers, or executable custom actions.'
     [void][Runtime.InteropServices.Marshal]::ReleaseComObject($database)
     $database = $null
-    Write-Host 'PASS: MSI version, stable upgrade identity, per-user registration, limited payload, Start menu launcher, and no application-executing custom actions.'
+    Write-Host 'PASS: Author attribution in help and the complete installer license, MSI version, stable upgrade identity, per-user registration, limited payload, Start menu launcher, and no application-executing custom actions.'
     if (-not $InstallLifecycle) { return }
     Assert-Installer (-not (Test-Path -LiteralPath 'HKCU:\Software\EasyEdgeApps\Installer')) 'Lifecycle tests refuse to touch an existing Easy Edge Apps MSI installation.'
     [void][IO.Directory]::CreateDirectory($testRoot)
