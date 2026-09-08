@@ -209,8 +209,12 @@ function Test-GuiSpaceLifecycle {
         Invoke-GuiFormEvent $Form 'OnActivated'
         Assert-Gui $Form.IsAnimationRunning 'An active window must animate without requiring mouse events.'
         $initialTime = $Form.SceneTime
-        for ($iteration = 0; $iteration -lt 12; $iteration++) { $Form.RefreshScene(); [Windows.Forms.Application]::DoEvents() }
-        Assert-Gui ($Form.SceneTime -gt $initialTime) 'The timer must advance the scene independently of the mouse.'
+        $advanceClock = [Diagnostics.Stopwatch]::StartNew()
+        while ($Form.SceneTime -le $initialTime -and $advanceClock.ElapsedMilliseconds -lt 2000 -and $Form.IsAnimationRunning) {
+            [Windows.Forms.Application]::DoEvents()
+        }
+        $advanceClock.Stop()
+        Assert-Gui ($Form.SceneTime -gt $initialTime) ('The timer must advance the scene independently of the mouse. Running: ' + $Form.IsAnimationRunning + '; elapsed milliseconds: ' + $advanceClock.ElapsedMilliseconds)
         $Form.Tag.MotionCheck.Checked = $false
         Assert-Gui (-not $Form.MotionEnabled -and -not $Form.IsAnimationRunning) 'The Motion checkbox must pause the timer.'
         $Form.Tag.MotionCheck.Checked = $true
