@@ -33,7 +33,7 @@ This execution-policy option applies only to that PowerShell process. It does no
 
 Use ordinary site addresses, not password-reset links, one-time sign-in links, or URLs containing secrets. Addresses, including query strings and fragments, are saved locally in clear text.
 
-![The setup window with a spiral starfield, a saved website, Get icon controls, and a Motion checkbox.](docs/images/setup.png)
+![The setup window with scattered stars, a saved website, Get icon controls, and a Motion checkbox.](docs/images/setup.png)
 
 The screenshot shows version 1.2.0 with animation paused and synthetic example data.
 
@@ -46,7 +46,7 @@ The screenshot shows version 1.2.0 with animation paused and synthetic example d
 - Setup uses native Windows controls, keyboard navigation, accessible names, and a resizable layout. Primary actions follow Windows highlight colors; high contrast restores system-colored controls. Destructive confirmation defaults to **No**.
 - The application logo is embedded in the script for the setup header and window icons; no separate branding file or download is needed at runtime.
 - **Windows-style controls:** Buttons, field/status labels, and checkboxes have icons, primary actions use system highlight colors, and textboxes support Ctrl+Backspace word deletion. Icons use the installed Segoe Fluent Icons font, falling back to Segoe MDL2 Assets or text-only controls. No fonts are bundled or downloaded. Text labels and keyboard navigation remain available; compact navigation buttons also have full accessible names and tooltips.
-- **Space background:** Setup has an original procedural spiral galaxy with continuously moving stars, soft starlight, and gently eased mouse parallax. Clear **Motion** to pause it. Windows reduced-motion settings and remote sessions keep the scene still; high contrast removes it. Animation also pauses while setup is inactive, hidden, minimized, or being resized. The background is rendered locally inside the single script, with no web view, asset downloads, or background service. Website shortcuts are unaffected.
+- **Space background:** Setup has an original procedural starfield with stars scattered across a dark sky, gentle independent drift, and softly eased mouse parallax. There are no spiral arms, central glow, or orbital motion. Stars keep moving when the mouse is outside the window or another application has focus. Clear **Motion** to pause it. Windows reduced-motion settings and remote sessions keep the scene still; high contrast removes it. Animation also pauses while setup is hidden, minimized, or being resized. The background is rendered locally inside the single script, with no web view, asset downloads, or background service. Website shortcuts are unaffected.
 
 The intended setup operator is a helper. The person using the shortcuts does not need to manage PowerShell.
 

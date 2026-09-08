@@ -164,6 +164,7 @@ function Test-GuiSpaceRenderer {
         $hoverChanges = 0
         $brightSamples = 0
         $stationarySamples = 0
+        $sectorSamples = New-Object int[] 16
         for ($vertical = 0; $vertical -lt $bitmap.Height; $vertical += 3) {
             for ($horizontal = 0; $horizontal -lt $bitmap.Width; $horizontal += 3) {
                 $offset = ($vertical * $bitmap.Width + $horizontal) * 4
@@ -171,9 +172,15 @@ function Test-GuiSpaceRenderer {
                 if ([BitConverter]::ToInt32($first, $offset) -ne [BitConverter]::ToInt32($hovered, $offset)) { $hoverChanges++ }
                 if ($first[$offset + 1] -gt 65) {
                     $brightSamples++
+                    $sector = [int][Math]::Floor($vertical * 4.0 / $bitmap.Height) * 4 + [int][Math]::Floor($horizontal * 4.0 / $bitmap.Width)
+                    $sectorSamples[$sector]++
                     if ($later[$offset + 1] -gt 65) { $stationarySamples++ }
                 }
             }
+        }
+        $averageSectorSamples = $brightSamples / 16.0
+        foreach ($sectorSample in $sectorSamples) {
+            Assert-Gui ($sectorSample -gt $averageSectorSamples / 3 -and $sectorSample -lt $averageSectorSamples * 2) 'Stars must be scattered across the viewport without a concentrated galaxy core or empty outer regions.'
         }
         Assert-Gui ($motionChanges -gt 1000 -and $brightSamples -gt 100 -and $stationarySamples -lt $brightSamples * 0.7) 'Stars must visibly change position on their own, not only change brightness or wait for mouse input.'
         Assert-Gui ($hoverChanges -gt 1000) 'Pointer movement must add a separate layered parallax response.'
@@ -185,11 +192,24 @@ function Test-GuiSpaceRenderer {
             $resizedGraphics = [Drawing.Graphics]::FromImage($resized)
             try {
                 $renderer.Render($resizedGraphics, $size, 8, $center, 0)
-                Assert-Gui ($resized.GetPixel([int]($size.Width * 0.58), [int]($size.Height * 0.52)).GetBrightness() -gt 0.08) 'The star cluster must stay inside the resized viewport.'
+                $resizedBytes = Get-GuiBitmapBytes $resized
+                $quadrantSamples = New-Object int[] 4
+                for ($vertical = 0; $vertical -lt $size.Height; $vertical += 8) {
+                    for ($horizontal = 0; $horizontal -lt $size.Width; $horizontal += 8) {
+                        $offset = ($vertical * $size.Width + $horizontal) * 4
+                        if ($resizedBytes[$offset + 1] -gt 65) {
+                            $quadrant = [int][Math]::Floor($vertical * 2.0 / $size.Height) * 2 + [int][Math]::Floor($horizontal * 2.0 / $size.Width)
+                            $quadrantSamples[$quadrant]++
+                        }
+                    }
+                }
+                foreach ($quadrantSample in $quadrantSamples) {
+                    Assert-Gui ($quadrantSample -gt 3) 'Scattered stars must remain visible across every quadrant of compact and full-HD viewports.'
+                }
             }
             finally { $resizedGraphics.Dispose(); $resized.Dispose() }
         }
-        Write-Host 'PASS: Autonomous star positions, independent parallax, stable pause frames, and compact/full-HD rendering.'
+        Write-Host 'PASS: Scattered stars without a galaxy core, autonomous drift, independent parallax, stable pause frames, and compact/full-HD rendering.'
     }
     finally { $hash.Dispose(); $graphics.Dispose(); $bitmap.Dispose(); $renderer.Dispose(); $renderer.Dispose() }
 }
@@ -218,8 +238,16 @@ function Test-GuiSpaceLifecycle {
         $Form.Tag.MotionCheck.Checked = $false
         Assert-Gui (-not $Form.MotionEnabled -and -not $Form.IsAnimationRunning) 'The Motion checkbox must pause the timer.'
         $Form.Tag.MotionCheck.Checked = $true
+        Invoke-GuiFormEvent $Form 'OnMouseLeave'
         Invoke-GuiFormEvent $Form 'OnDeactivate'
-        Assert-Gui (-not $Form.IsAnimationRunning) 'Inactive windows must not keep rendering in the background.'
+        Assert-Gui $Form.IsAnimationRunning 'A visible window must keep animating after the mouse leaves and focus moves elsewhere.'
+        $initialTime = $Form.SceneTime
+        $advanceClock.Restart()
+        while ($Form.SceneTime -le $initialTime -and $advanceClock.ElapsedMilliseconds -lt 2000 -and $Form.IsAnimationRunning) {
+            [Windows.Forms.Application]::DoEvents()
+        }
+        $advanceClock.Stop()
+        Assert-Gui ($Form.SceneTime -gt $initialTime) 'The scene must advance in a visible, unfocused window without mouse input.'
         Invoke-GuiFormEvent $Form 'OnActivated'
         Invoke-GuiFormEvent $Form 'OnResizeBegin'
         Assert-Gui (-not $Form.IsAnimationRunning) 'Live resizing must pause animation.'
@@ -242,7 +270,7 @@ function Test-GuiSpaceLifecycle {
         [void]$preferences.Invoke($Form, [object[]]@($true, $true, $false))
         Assert-Gui (-not $Form.SceneEnabled -and -not $Form.IsAnimationRunning -and $Form.BackColor -eq [Drawing.SystemColors]::Window -and $Form.Tag.NameInput.BackColor -eq [Drawing.SystemColors]::Window) 'High contrast must remove decorative rendering and restore system-colored controls.'
         Assert-Gui $Form.MotionEnabled 'Accessibility changes must not overwrite the user motion preference.'
-        Write-Host 'PASS: Independent animation timer, pause/resume, inactive/resize/hidden/minimized suspension, and simulated accessibility/remote preferences.'
+        Write-Host 'PASS: Animation without mouse input or focus, pause/resume, resize/hidden/minimized suspension, and simulated accessibility/remote preferences.'
     }
     finally { $Form.RefreshPreferences(); $Form.MotionEnabled = $false }
 }

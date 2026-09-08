@@ -2116,10 +2116,9 @@ namespace EasyEdgeApps
         {
             public float Horizontal, Vertical, Depth, Phase, Flux;
             public int Tone, Kernel;
-            public bool Galaxy;
         }
 
-        private readonly Star[] stars = new Star[3880];
+        private readonly Star[] stars = new Star[2200];
         private readonly Color[] tones = { Color.FromArgb(226, 239, 255), Color.FromArgb(107, 183, 239), Color.FromArgb(255, 196, 143) };
         private readonly int[] kernelSizes = { 3, 7, 13, 25, 41 };
         private readonly float[][] kernels = new float[5][];
@@ -2136,40 +2135,14 @@ namespace EasyEdgeApps
             {
                 double brightness = random.NextDouble();
                 Star star = new Star {
+                    Horizontal = (float)random.NextDouble(), Vertical = (float)random.NextDouble(),
                     Depth = (float)random.NextDouble(), Phase = (float)(random.NextDouble() * Math.PI * 2),
                     Tone = random.Next(10) < 6 ? 0 : random.Next(1, 3),
                     Kernel = brightness > 0.994 ? 4 : brightness > 0.97 ? 3 : brightness > 0.86 ? 2 : brightness > 0.52 ? 1 : 0,
-                    Flux = (float)(40 + brightness * 180), Galaxy = index < 3600
+                    Flux = (float)(40 + brightness * 180)
                 };
-                if (index < 3000)
-                {
-                    double radius = 0.07 + Math.Pow(random.NextDouble(), 0.73) * 0.9;
-                    double scattering = Gaussian(random);
-                    star.Horizontal = (float)(radius + Gaussian(random) * (0.006 + radius * 0.018));
-                    star.Vertical = (float)((index % 3) * Math.PI * 2 / 3 + radius * 5.6 + scattering * (0.055 + radius * 0.12));
-                    if (index % 9 == 0) { star.Vertical += (float)(Gaussian(random) * 0.48); star.Flux *= 0.48f; }
-                }
-                else if (index < 3600)
-                {
-                    star.Horizontal = (float)(Math.Pow(random.NextDouble(), 1.55) * 0.155);
-                    star.Vertical = (float)(random.NextDouble() * Math.PI * 2);
-                    star.Flux *= 0.8f;
-                    star.Tone = 0;
-                    star.Kernel = Math.Min(2, star.Kernel);
-                }
-                else
-                {
-                    star.Horizontal = (float)random.NextDouble();
-                    star.Vertical = (float)random.NextDouble();
-                    star.Flux *= 0.72f;
-                }
                 stars[index] = star;
             }
-        }
-
-        private static double Gaussian(Random random)
-        {
-            return Math.Sqrt(-2 * Math.Log(Math.Max(0.00001, random.NextDouble()))) * Math.Cos(random.NextDouble() * Math.PI * 2);
         }
 
         private static float[] CreateKernel(int size, int level)
@@ -2202,21 +2175,7 @@ namespace EasyEdgeApps
             height = viewport.Height;
             pixels = new int[checked(width * height)];
             background = new int[pixels.Length];
-            double scale = Math.Min(width * 0.47, height * 0.76);
-            for (int vertical = 0; vertical < height; vertical++)
-            {
-                for (int horizontal = 0; horizontal < width; horizontal++)
-                {
-                    double horizontalDistance = (horizontal - width * 0.58) / scale;
-                    double verticalDistance = (vertical - height * 0.52) / scale;
-                    double radius = horizontalDistance * horizontalDistance + verticalDistance * verticalDistance * 1.6;
-                    double starlight = Math.Exp(-radius * 19) * 11 + Math.Exp(-radius * 210) * 17;
-                    int red = 4 + (int)starlight;
-                    int green = 8 + (int)(starlight * 1.04);
-                    int blue = 11 + (int)(starlight * 1.12);
-                    background[vertical * width + horizontal] = unchecked((int)0xff000000) | (red << 16) | (green << 8) | blue;
-                }
-            }
+            for (int index = 0; index < background.Length; index++) background[index] = unchecked((int)0xff050709);
         }
 
         private void AddLight(int horizontal, int vertical, float intensity, Color color)
@@ -2270,29 +2229,15 @@ namespace EasyEdgeApps
             float influence = Math.Max(0, Math.Min(1, pointerInfluence));
             float horizontalShift = (Math.Max(0, Math.Min(1, pointer.X)) - 0.5f) * influence;
             float verticalShift = (Math.Max(0, Math.Min(1, pointer.Y)) - 0.5f) * influence;
-            float scale = Math.Min(width * 0.47f, height * 0.76f);
-            double tilt = -0.38 + horizontalShift * 0.018;
-            double tiltCosine = Math.Cos(tilt);
-            double tiltSine = Math.Sin(tilt);
+            double horizontalSpan = width + 64;
+            double verticalSpan = height + 64;
             for (int index = 0; index < stars.Length; index++)
             {
                 Star star = stars[index];
-                float horizontal, vertical;
-                if (star.Galaxy)
-                {
-                    double angle = star.Vertical + seconds * (0.0018 + star.Depth * 0.00035);
-                    double orbitHorizontal = Math.Cos(angle) * star.Horizontal * scale;
-                    double orbitVertical = Math.Sin(angle) * star.Horizontal * scale * (0.74 + verticalShift * 0.015);
-                    horizontal = width * 0.58f + (float)(orbitHorizontal * tiltCosine - orbitVertical * tiltSine);
-                    vertical = height * 0.52f + (float)(orbitHorizontal * tiltSine + orbitVertical * tiltCosine);
-                }
-                else
-                {
-                    double span = width + 48;
-                    double drift = star.Horizontal * span - seconds * (0.12 + star.Depth * 0.32);
-                    horizontal = (float)((drift % span + span) % span) - 24;
-                    vertical = star.Vertical * (height + 48) - 24 + (float)Math.Sin(seconds * 0.018 + star.Phase) * 3;
-                }
+                double horizontalDrift = star.Horizontal * horizontalSpan - seconds * (0.4 + star.Depth * 0.8);
+                double verticalDrift = star.Vertical * verticalSpan + seconds * (0.12 + star.Depth * 0.24);
+                float horizontal = (float)((horizontalDrift % horizontalSpan + horizontalSpan) % horizontalSpan) - 32;
+                float vertical = (float)((verticalDrift % verticalSpan + verticalSpan) % verticalSpan) - 32;
                 horizontal += horizontalShift * (4 + star.Depth * 14);
                 vertical += verticalShift * (4 + star.Depth * 14);
                 float shimmer = (float)(0.97 + Math.Sin(seconds * 0.18 + star.Phase) * 0.03);
@@ -2326,7 +2271,7 @@ namespace EasyEdgeApps
         private readonly Stopwatch animationClock = new Stopwatch();
         private StarfieldRenderer renderer;
         private Bitmap frame;
-        private bool active, resizing, failed, disposing;
+        private bool resizing, failed, disposing;
         private bool motionEnabled = true;
         private bool animationsAllowed;
         private bool highContrast;
@@ -2400,7 +2345,7 @@ namespace EasyEdgeApps
         private void UpdateAnimationState()
         {
             if (animationTimer == null || disposing) return;
-            bool shouldRun = MotionEnabled && MotionAvailable && active && Visible && !resizing && WindowState != FormWindowState.Minimized;
+            bool shouldRun = MotionEnabled && MotionAvailable && Visible && !resizing && WindowState != FormWindowState.Minimized;
             if (shouldRun)
             {
                 if (!animationTimer.Enabled)
@@ -2506,20 +2451,6 @@ namespace EasyEdgeApps
             if (owner != null) MotionEnabled = owner.MotionEnabled;
             RefreshScene();
             UpdateAnimationState();
-        }
-
-        protected override void OnActivated(EventArgs arguments)
-        {
-            base.OnActivated(arguments);
-            active = true;
-            UpdateAnimationState();
-        }
-
-        protected override void OnDeactivate(EventArgs arguments)
-        {
-            active = false;
-            UpdateAnimationState();
-            base.OnDeactivate(arguments);
         }
 
         protected override void OnVisibleChanged(EventArgs arguments)
