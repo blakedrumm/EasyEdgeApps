@@ -45,6 +45,42 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build launcher and validate MSI
         run: pwsh.exe -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tools/Build-Installer.ps1
+      - name: Verify published predecessor
+        run: |
+          $previous = Join-Path $env:RUNNER_TEMP 'EasyEdgeApps-1.3.2-x64.msi'
+          Invoke-WebRequest -Uri 'https://github.com/blakedrumm/EasyEdgeApps/releases/download/v1.3.2/EasyEdgeApps-1.3.2-x64.msi' -OutFile $previous
+          if ((Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash -ine 'd11eecfb3155029006c74e02ad545609606abffd5b2b7d809e74b8f9b930241f') { throw 'Published predecessor checksum mismatch.' }
+      - name: Prove install-location regression check
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath ./artifacts -Filter 'EasyEdgeApps-*-x64.msi' -File)
+          if ($packages.Count -ne 1) { throw 'Expected exactly one installer.' }
+          $broken = Join-Path $env:RUNNER_TEMP 'missing-folder-lookup.msi'
+          Copy-Item -LiteralPath $packages[0].FullName -Destination $broken
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $database = $null
+          try {
+              $database = $installer.OpenDatabase($broken, 1)
+              $view = $database.OpenView('DELETE FROM `AppSearch` WHERE `Property` = ''INSTALLFOLDER''')
+              try { [void]$view.Execute() }
+              finally { [void]$view.Close(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($view) }
+              $summary = $database.SummaryInformation(1)
+              try {
+                  $summary.GetType().InvokeMember('Property', [Reflection.BindingFlags]::SetProperty, $null, $summary, @([int]9, [Guid]::NewGuid().ToString('B').ToUpperInvariant()))
+                  $summary.Persist()
+              }
+              finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($summary) }
+              $database.Commit()
+          }
+          finally {
+              if ($null -ne $database) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($database) }
+              [void][Runtime.InteropServices.Marshal]::ReleaseComObject($installer)
+          }
+          $output = & powershell.exe -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-EasyEdgeAppsInstaller.ps1 -MsiPath $broken 2>&1
+          $failureCode = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($failureCode -eq 0 -or ($output | Out-String) -notmatch 'The MSI must restore its prior install folder') { throw 'The mutated installer did not fail on the intended path-retention regression.' }
+          $global:LASTEXITCODE = 0
+          Write-Host 'PASS: Removing the previous-install-folder lookup makes the regression fail for the expected reason.'
       - name: Per-user install, launcher, upgrade, repair, and uninstall
         run: |
           $packages = @(Get-ChildItem -LiteralPath ./artifacts -Filter 'EasyEdgeApps-*-x64.msi' -File)
@@ -52,4 +88,13 @@ jobs:
           foreach ($hostExecutable in @('powershell.exe', 'pwsh.exe')) {
               & $hostExecutable -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-EasyEdgeAppsInstaller.ps1 -MsiPath $packages[0].FullName -InstallLifecycle
               if ($LASTEXITCODE -ne 0) { throw "MSI lifecycle failed in $hostExecutable." }
+              & $hostExecutable -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-EasyEdgeAppsInstaller.ps1 -MsiPath $packages[0].FullName -InstallLifecycle -PreviousMsiPath (Join-Path $env:RUNNER_TEMP 'EasyEdgeApps-1.3.2-x64.msi') -PreviousMsiSha256 'd11eecfb3155029006c74e02ad545609606abffd5b2b7d809e74b8f9b930241f'
+              if ($LASTEXITCODE -ne 0) { throw "Authentic predecessor upgrade failed in $hostExecutable." }
           }
+      - name: Retain tested MSI
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tested-msi
+          path: artifacts/EasyEdgeApps-*-x64.msi
+          if-no-files-found: error
+          retention-days: 14

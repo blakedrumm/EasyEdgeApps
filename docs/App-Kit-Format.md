@@ -29,6 +29,8 @@ Required kit fields are `Product`, `SchemaVersion`, `Name`, and `Apps`. Required
 
 Version 1.3.0 does not change this schema. Global preferences, update timestamps, diagnostic logs, installer registration, and Edge profile identifiers are not portable kit fields. A local app manifest may store an optional validated `EdgeProfile`, but exports omit it and kits containing that field are rejected. An import preserves an existing app's local profile; newly created apps use the destination user's default. Kit Desktop/Start menu choices remain authoritative for placement.
 
+Version 1.3.3 also leaves the portable schemas unchanged. `Taskbar`, Windows pin state, and dedicated app profiles are not kit fields. Imports preserve a destination app's local Taskbar mode and never request pins; new apps default to Taskbar off. A kit that removes a taskbar app's required Start menu entry conflicts in preflight before any selected app is written. Explicitly clear Taskbar in setup first if that placement change is intended.
+
 | Field | Validation |
 | --- | --- |
 | Product | Exact string `EasyEdgeApps.AppKit` |
@@ -70,7 +72,7 @@ Exports with at least one fresh website use schema 2, which requires application
 
 Schema 2 applies each app's session choice explicitly. Missing `FreshSession` canonicalizes to false and can therefore disable an existing destination's fresh sessions. The preview discloses a return to persistent browsing; normal approval or reviewed unattended approval is required. Selected GUI/CLI subsets preserve their source schema. Schema 1 imports retain an existing app's local session choice and default new apps to normal browsing.
 
-Only this Boolean is portable. Temporary profiles, executable bytes, source, hashes, paths, normal Edge profile identifiers, and browser data are never included. Import generates the launcher locally using the destination's Edge path and platform compiler. Local fresh-app manifests also use schema 2, but have a separate nonportable contract with executable/source hashes; they are not App Kits. Older applications reject schema 2 rather than weaken privacy silently.
+Only this Boolean is portable. Temporary profiles, executable bytes, source, hashes, paths, normal Edge profile identifiers, and browser data are never included. Import generates the launcher locally using the destination's Edge path and platform compiler. Local fresh-app manifests used schema 2 in 1.3.2; new or repaired Fresh/Taskbar apps use schema 3 in 1.3.3. That separate nonportable contract includes explicit FreshSession/Taskbar Booleans and executable/source hashes; it is not an App Kit. Older applications reject unsupported local manifests rather than silently switch profiles. Disabling Fresh on an existing taskbar app retains its dedicated persistent profile mode, not the normal Edge profile.
 
 The encrypted envelope remains version 1 and authenticates either complete inner payload schema. Its algorithms, KDF, bounds, and associated-data bytes do not change. See [fresh-session boundaries](../SECURITY.md#fresh-session-boundaries) for cleanup and sign-in limits.
 

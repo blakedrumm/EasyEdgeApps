@@ -1,7 +1,12 @@
 #requires -Version 5.1
 
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string]$MsiPath, [switch]$InstallLifecycle)
+param(
+    [Parameter(Mandatory = $true)][string]$MsiPath,
+    [switch]$InstallLifecycle,
+    [string]$PreviousMsiPath,
+    [ValidatePattern('^[a-fA-F0-9]{64}$')][string]$PreviousMsiSha256
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -14,6 +19,8 @@ $database = $null
 $installedProduct = ''
 $oldProduct = ''
 $retainLogs = $false
+if ([bool]$PreviousMsiPath -ne [bool]$PreviousMsiSha256) { throw 'Supply both the trusted previous MSI path and its published SHA-256 checksum.' }
+if ($PreviousMsiPath -and -not $InstallLifecycle) { throw 'Previous MSI verification requires the explicit InstallLifecycle switch.' }
 
 function Assert-Installer {
     param([bool]$Condition, [string]$Message)
@@ -73,6 +80,9 @@ try {
     Assert-Installer (-not $properties.ContainsKey('ALLUSERS') -or -not $properties.ALLUSERS) 'The MSI must install for the current user, not for the machine.'
     Assert-Installer (-not $properties.ContainsKey('ARPSYSTEMCOMPONENT') -or $properties.ARPSYSTEMCOMPONENT -ne '1') 'The installed application must not be hidden from Installed Apps.'
     Assert-Installer ($properties.UpgradeCode -ceq '{9D0AF71A-353C-4A88-A171-16249356093F}') 'The upgrade identity must remain stable across releases.'
+    $folderSearch = @(Read-MsiRows $database 'SELECT `Signature_` FROM `AppSearch` WHERE `Property` = ''INSTALLFOLDER''' @('Signature'))
+    $folderRegistry = @(Read-MsiRows $database 'SELECT `Root`, `Key`, `Name` FROM `RegLocator` WHERE `Signature_` = ''PreviousInstallFolder''' @('Root', 'Key', 'Name'))
+    Assert-Installer ($folderSearch.Count -eq 1 -and $folderSearch[0].Signature -ceq 'PreviousInstallFolder' -and $folderRegistry.Count -eq 1 -and $folderRegistry[0].Root -ceq '1' -and $folderRegistry[0].Key -ceq 'Software\EasyEdgeApps\Installer' -and $folderRegistry[0].Name -ceq 'InstallFolder') 'The MSI must restore its prior install folder through its per-user registry lookup.'
     $files = @(Read-MsiRows $database 'SELECT `File`, `FileName` FROM `File`' @('Id', 'Name'))
     Assert-Installer ($files.Count -eq 4 -and @($files | Where-Object { $_.Id -in @('LauncherFile', 'ApplicationScript', 'ApplicationLicense', 'ApplicationNotices') }).Count -eq 4) 'The MSI must contain only the launcher, portable script, license, and notices.'
     $registryRows = @(Read-MsiRows $database 'SELECT `Root`, `Key` FROM `Registry`' @('Root', 'Key'))
@@ -85,53 +95,71 @@ try {
     Assert-Installer (@($customActions | Where-Object { ([int]$_.Type -band 63) -notin @(1, 51) }).Count -eq 0) 'The MSI must not execute PowerShell, scripts, downloaded installers, or executable custom actions.'
     [void][Runtime.InteropServices.Marshal]::ReleaseComObject($database)
     $database = $null
-    Write-Host 'PASS: Author attribution in help and the complete installer license, MSI version, stable upgrade identity, per-user registration, limited payload, Start menu launcher, and no application-executing custom actions.'
+    Write-Host 'PASS: Author attribution in help and the complete installer license, MSI version, stable upgrade identity, install-folder lookup, per-user registration, limited payload, Start menu launcher, and no application-executing custom actions.'
     if (-not $InstallLifecycle) { return }
     Assert-Installer (-not (Test-Path -LiteralPath 'HKCU:\Software\EasyEdgeApps\Installer')) 'Lifecycle tests refuse to touch an existing Easy Edge Apps MSI installation.'
+    Assert-Installer ($installer.ProductState($properties.ProductCode) -eq -1) 'Lifecycle tests refuse to touch an already registered candidate product.'
     [void][IO.Directory]::CreateDirectory($testRoot)
     $installDirectory = Join-Path $testRoot 'Installed'
     $programsDirectory = [Environment]::GetFolderPath('Programs')
     Assert-Installer (-not [IO.File]::Exists((Join-Path $programsDirectory 'Easy Edge Apps.lnk'))) 'Lifecycle tests refuse to overwrite an existing manager shortcut.'
     $directoryOptions = ' INSTALLFOLDER="' + $installDirectory + '"'
     $oldPackage = Join-Path $testRoot 'older-test-fixture.msi'
-    [IO.File]::Copy($packagePath, $oldPackage)
-    $oldProduct = [Guid]::NewGuid().ToString('B').ToUpperInvariant()
-    $database = $installer.OpenDatabase($oldPackage, 1)
-    Invoke-MsiStatement $database "UPDATE ``Property`` SET ``Value`` = '1.2.99' WHERE ``Property`` = 'ProductVersion'"
-    Invoke-MsiStatement $database ("UPDATE ``Property`` SET ``Value`` = '" + $oldProduct + "' WHERE ``Property`` = 'ProductCode'")
-    $upgradeRows = @(Read-MsiRows $database 'SELECT `UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`, `Remove`, `ActionProperty` FROM `Upgrade`' @('UpgradeCode', 'VersionMin', 'VersionMax', 'Language', 'Attributes', 'Remove', 'ActionProperty'))
-    Invoke-MsiStatement $database 'DELETE FROM `Upgrade`'
-    foreach ($upgradeRow in $upgradeRows) {
-        $columnNames = New-Object 'Collections.Generic.List[string]'
-        $columnValues = New-Object 'Collections.Generic.List[string]'
-        foreach ($field in $upgradeRow.PSObject.Properties) {
-            if ([string]::IsNullOrEmpty($field.Value)) { continue }
-            $value = $field.Value
-            if ($field.Name -in @('VersionMin', 'VersionMax') -and $value -ceq $properties.ProductVersion) { $value = '1.2.99' }
-            $columnNames.Add('`' + $field.Name + '`')
-            if ($field.Name -ceq 'Attributes') { $columnValues.Add(([int]$value).ToString()) }
-            else { $columnValues.Add("'" + $value.Replace("'", "''") + "'") }
+    if ($PreviousMsiPath) {
+        $previousPath = [IO.Path]::GetFullPath($PreviousMsiPath)
+        Assert-Installer ((Get-FileHash -LiteralPath $previousPath -Algorithm SHA256).Hash -ieq $PreviousMsiSha256) 'The previous MSI must match its independently obtained published checksum.'
+        [IO.File]::Copy($previousPath, $oldPackage)
+        $database = $installer.OpenDatabase($oldPackage, 0)
+        $previousProperties = @{}
+        foreach ($row in @(Read-MsiRows $database 'SELECT `Property`, `Value` FROM `Property`' @('Name', 'Value'))) { $previousProperties[$row.Name] = $row.Value }
+        Assert-Installer ($previousProperties.ProductName -ceq 'Easy Edge Apps' -and $previousProperties.UpgradeCode -ceq $properties.UpgradeCode -and [version]$previousProperties.ProductVersion -lt [version]$properties.ProductVersion) 'The authentic predecessor must be an older version of the same product.'
+        Assert-Installer (-not $previousProperties.ContainsKey('ALLUSERS') -or -not $previousProperties.ALLUSERS) 'The authentic predecessor must be a per-user package.'
+        Assert-Installer ($installer.ProductState($previousProperties.ProductCode) -eq -1) 'Lifecycle tests refuse to touch an already registered predecessor product.'
+        $oldProduct = $previousProperties.ProductCode
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($database)
+        $database = $null
+    }
+    else {
+        [IO.File]::Copy($packagePath, $oldPackage)
+        $oldProduct = [Guid]::NewGuid().ToString('B').ToUpperInvariant()
+        $database = $installer.OpenDatabase($oldPackage, 1)
+        Invoke-MsiStatement $database "UPDATE ``Property`` SET ``Value`` = '1.2.99' WHERE ``Property`` = 'ProductVersion'"
+        Invoke-MsiStatement $database ("UPDATE ``Property`` SET ``Value`` = '" + $oldProduct + "' WHERE ``Property`` = 'ProductCode'")
+        $upgradeRows = @(Read-MsiRows $database 'SELECT `UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`, `Remove`, `ActionProperty` FROM `Upgrade`' @('UpgradeCode', 'VersionMin', 'VersionMax', 'Language', 'Attributes', 'Remove', 'ActionProperty'))
+        Invoke-MsiStatement $database 'DELETE FROM `Upgrade`'
+        foreach ($upgradeRow in $upgradeRows) {
+            $columnNames = New-Object 'Collections.Generic.List[string]'
+            $columnValues = New-Object 'Collections.Generic.List[string]'
+            foreach ($field in $upgradeRow.PSObject.Properties) {
+                if ([string]::IsNullOrEmpty($field.Value)) { continue }
+                $value = $field.Value
+                if ($field.Name -in @('VersionMin', 'VersionMax') -and $value -ceq $properties.ProductVersion) { $value = '1.2.99' }
+                $columnNames.Add('`' + $field.Name + '`')
+                if ($field.Name -ceq 'Attributes') { $columnValues.Add(([int]$value).ToString()) }
+                else { $columnValues.Add("'" + $value.Replace("'", "''") + "'") }
+            }
+            Invoke-MsiStatement $database ('INSERT INTO `Upgrade` (' + ($columnNames -join ', ') + ') VALUES (' + ($columnValues -join ', ') + ')')
         }
-        Invoke-MsiStatement $database ('INSERT INTO `Upgrade` (' + ($columnNames -join ', ') + ') VALUES (' + ($columnValues -join ', ') + ')')
+        $summary = $database.SummaryInformation(1)
+        try {
+            $summary.GetType().InvokeMember('Property', [Reflection.BindingFlags]::SetProperty, $null, $summary, @([int]9, [Guid]::NewGuid().ToString('B').ToUpperInvariant()))
+            $summary.Persist()
+        }
+        finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($summary) }
+        $database.Commit()
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($database)
+        $database = $null
     }
-    $summary = $database.SummaryInformation(1)
-    try {
-        $summary.GetType().InvokeMember('Property', [Reflection.BindingFlags]::SetProperty, $null, $summary, @([int]9, [Guid]::NewGuid().ToString('B').ToUpperInvariant()))
-        $summary.Persist()
-    }
-    finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($summary) }
-    $database.Commit()
-    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($database)
-    $database = $null
     $installedProduct = $oldProduct
     Invoke-InstallerTest ('/i "' + $oldPackage + '"' + $directoryOptions) 'install-older'
     Assert-Installer ([IO.File]::Exists((Join-Path $installDirectory 'EasyEdgeApps.exe')) -and [IO.File]::Exists((Join-Path $programsDirectory 'Easy Edge Apps.lnk'))) 'Installation must create the manager and its Start menu entry in the selected test folders.'
     $unrelatedPath = Join-Path $installDirectory 'keep-unrelated.txt'
     [IO.File]::WriteAllText($unrelatedPath, 'Synthetic file not owned by the installer.')
-    Invoke-InstallerTest ('/i "' + $packagePath + '"' + $directoryOptions) 'upgrade'
+    Invoke-InstallerTest ('/i "' + $packagePath + '"') 'upgrade'
     $installedProduct = $properties.ProductCode
     Assert-Installer ($installer.ProductState($oldProduct) -eq -1 -and $installer.ProductState($installedProduct) -eq 5) 'A major upgrade must replace the older registration instead of installing side by side.'
     $installedScript = Join-Path $installDirectory 'EasyEdgeApps.ps1'
+    Assert-Installer ([IO.File]::Exists($installedScript) -and [IO.Path]::GetFullPath((Get-ItemProperty -LiteralPath 'HKCU:\Software\EasyEdgeApps\Installer' -Name InstallFolder).InstallFolder).TrimEnd('\') -ieq $installDirectory.TrimEnd('\')) 'Upgrade must retain the prior nondefault install location without an INSTALLFOLDER argument.'
     Assert-Installer ((Get-FileHash -LiteralPath $installedScript).Hash -ceq (Get-FileHash -LiteralPath (Join-Path $projectRoot 'EasyEdgeApps.ps1')).Hash) 'The installed script must match the tested application bytes.'
     $installedNotices = [IO.File]::ReadAllText((Join-Path $installDirectory 'THIRD-PARTY-NOTICES.md'))
     Assert-Installer ($installedNotices.StartsWith([IO.File]::ReadAllText((Join-Path $projectRoot 'THIRD-PARTY-NOTICES.md')), [StringComparison]::Ordinal) -and
@@ -184,6 +212,7 @@ $launchFacts = [pscustomobject]@{
     Assert-Installer (-not [IO.File]::Exists($installedScript) -and -not [IO.File]::Exists((Join-Path $programsDirectory 'Easy Edge Apps.lnk')) -and [IO.File]::Exists($unrelatedPath)) 'Uninstall must remove only installed program files and its manager shortcut, preserving unrelated files.'
     Assert-Installer (-not (Test-Path -LiteralPath 'HKCU:\Software\EasyEdgeApps\Installer')) 'Uninstall must remove its own HKCU installer markers.'
     Write-Host 'PASS: Actual per-user MSI install, upgrade, downgrade rejection, repair, launcher configuration, Installed Apps registration, and uninstall preservation.'
+    if ($PreviousMsiPath) { Write-Host ('PASS: Authentic checksum-verified ' + $previousProperties.ProductVersion + ' upgrade retains the nondefault install folder without resupplying it.') }
 }
 catch { $retainLogs = $true; throw }
 finally {

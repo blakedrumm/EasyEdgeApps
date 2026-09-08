@@ -20,6 +20,22 @@ $form = $null
 $script:ApproveChange = $false
 $script:ExplorerRequests = New-Object 'Collections.Generic.List[object]'
 $script:FailExplorer = $false
+$script:PinRequests = New-Object 'Collections.Generic.List[string]'
+$script:FailPinRequest = $false
+
+function Request-EeaTaskbarPin {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$AppName, $Context)
+    if ($script:FailPinRequest) { throw 'Synthetic Windows pin failure.' }
+    Assert-Gui (Get-EeaStateTaskbar (Read-EeaManifest $Context $AppName)) 'Pin requests must follow a saved taskbar app, not unsaved editor data.'
+    $script:PinRequests.Add($AppName)
+    $process = [pscustomobject]@{ HasExited = $false; ExitCode = 0; Disposed = $false; FailRefresh = $false; CloseAccepted = $true; Killed = $false }
+    $process | Add-Member ScriptMethod Refresh { if ($this.FailRefresh) { throw 'Synthetic process inspection failure.' } }
+    $process | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+    $process | Add-Member ScriptMethod CloseMainWindow { if ($this.CloseAccepted) { $this.HasExited = $true; $this.ExitCode = 3 }; return $this.CloseAccepted }
+    $process | Add-Member ScriptMethod Kill { $this.Killed = $true; $this.HasExited = $true; $this.ExitCode = 3 }
+    return $process
+}
 
 function Start-Process {
     [CmdletBinding()]
@@ -49,34 +65,93 @@ function Test-GuiTaskbar {
     $ui = $Form.Tag
     $paths = Get-EeaPaths $Context 'My News'
     $manifestHash = (Get-FileHash -LiteralPath $paths.Manifest).Hash
-    $savedWebsite = $ui.UrlInput.Text
-    Assert-Gui ($ui.PinButton.Enabled -and $ui.PinButton.Image.Tag -ceq 'Pin' -and $ui.PinButton.AccessibleName -ceq 'Pin saved website to taskbar') 'A saved website must expose an accessible taskbar command with its pin icon.'
-    $ui.AppList.SelectedIndex = -1
-    Assert-Gui (-not $ui.PinButton.Enabled) 'Clearing selection must disable taskbar pinning.'
-    $ui.AppList.SelectedIndex = 0
-    $ui.UrlInput.Text = 'https://example.com/unsaved-taskbar-edit'
-    $ui.PinButton.PerformClick()
-    Assert-Gui ($script:ExplorerRequests.Count -eq 1 -and $script:ExplorerRequests[0].Arguments -ceq ('/select,"{0}"' -f $paths.StartMenu)) 'The pin button must select the owned saved shortcut in Explorer without launching the website.'
-    Assert-Gui ($ui.StatusLabel.Text -ceq 'Finish pinning in File Explorer.') 'Pinning assistance must name the remaining Windows action, not report that a pin was created.'
-    Assert-Gui ($ui.UrlInput.Text -ceq 'https://example.com/unsaved-taskbar-edit' -and (Get-FileHash -LiteralPath $paths.Manifest).Hash -ceq $manifestHash) 'Pinning assistance must leave unsaved edits and saved website data unchanged.'
-    $script:FailExplorer = $true
+    Assert-Gui ($ui.TaskbarCheck.Image.Tag -ceq 'Pin' -and $ui.TaskbarCheck.AccessibleName -ceq 'Request a taskbar pin for this website') 'Taskbar must be an accessible placement checkbox with its pin icon.'
+    $ui.TaskbarCheck.Checked = $true
+    Assert-Gui ($ui.StartMenuCheck.Checked -and -not $ui.StartMenuCheck.Enabled) 'A taskbar request must retain the Start menu entry required by Windows.'
+    Assert-Gui ((Get-FileHash -LiteralPath $paths.Manifest).Hash -ceq $manifestHash -and $script:PinRequests.Count -eq 0) 'Selecting the checkbox alone must not save or request a pin.'
+    $ui.SaveButton.PerformClick()
+    Assert-Gui (-not (Get-EeaStateTaskbar (Read-EeaManifest $Context 'My News')) -and $script:PinRequests.Count -eq 0) 'Declining the dedicated-profile confirmation must leave the existing website unchanged.'
+    $previousApproval = $script:ApproveChange
+    $script:ApproveChange = $true
     try {
-        $ui.PinButton.PerformClick()
-        Assert-Gui ($ui.PinButton.Enabled -and $ui.StatusLabel.Text -ceq 'FAILED: Synthetic Explorer failure.') 'An Explorer failure must be reported without disabling further use of setup.'
+        foreach ($exitCode in @(0, 1, 3, 4)) {
+            $ui.SaveButton.PerformClick()
+            $process = $ui.PinProcess
+            Assert-Gui ($null -ne $process -and -not $ui.SaveButton.Enabled -and $ui.PinTimer.Enabled -and (Get-EeaStateTaskbar (Read-EeaManifest $Context 'My News'))) 'Saving a taskbar app must wait asynchronously for Windows, after persisting the selected website.'
+            foreach ($control in @($ui.AppList, $ui.NewButton, $ui.OpenButton, $ui.RemoveButton, $ui.ImportButton, $ui.FavoritesButton, $ui.CheckButton, $ui.GetIconButton)) {
+                Assert-Gui (-not $control.Enabled) 'Conflicting website actions must be unavailable while Windows pin approval is pending.'
+            }
+            $requestCount = $script:PinRequests.Count
+            $ui.SaveButton.PerformClick()
+            $ui.RemoveButton.PerformClick()
+            Assert-Gui ($script:PinRequests.Count -eq $requestCount -and $null -ne (Read-EeaManifest $Context 'My News')) 'A pending pin must not allow duplicate requests or removal of its saved app.'
+            $process.ExitCode = $exitCode
+            $process.HasExited = $true
+            Complete-EeaTaskbarPin $Form
+            Assert-Gui ($process.Disposed -and $null -eq $ui.PinProcess -and $ui.SaveButton.Enabled -and -not $ui.PinTimer.Enabled) 'A completed pin request must restore controls and release its process handle.'
+            if ($exitCode -eq 0) { Assert-Gui ($ui.StatusLabel.Text -ceq 'Pinned to taskbar: My News') 'Only a successful Windows result may report a completed pin.' }
+            else { Assert-Gui (-not $ui.StatusLabel.Text.StartsWith('Pinned')) 'Declined or unavailable Windows pinning must not be reported as pinned.' }
+        }
+        $ui.SaveButton.PerformClick()
+        $process = $ui.PinProcess
+        $process.FailRefresh = $true
+        Complete-EeaTaskbarPin $Form
+        Assert-Gui ($process.Killed -and $process.Disposed -and $null -eq $ui.PinProcess -and $ui.SaveButton.Enabled -and $ui.RemoveButton.Enabled -and $ui.StatusLabel.Text -ceq 'Saved. Taskbar pin result could not be confirmed.') 'A failed process inspection must not leave setup stuck or report a successful pin.'
+        foreach ($closeAccepted in @($true, $false)) {
+            $closingForm = New-EeaSetupForm -Context $Context
+            try {
+                $closingForm.StartPosition = [Windows.Forms.FormStartPosition]::Manual
+                $closingForm.Location = New-Object Drawing.Point(-10000, -10000)
+                $closingForm.ShowInTaskbar = $false
+                $closingForm.Show()
+                $closingForm.Tag.AppList.SelectedIndex = 0
+                $closingForm.Tag.SaveButton.PerformClick()
+                $closingProcess = $closingForm.Tag.PinProcess
+                $closingProcess.CloseAccepted = $closeAccepted
+                $closingForm.Close()
+                Assert-Gui ($closingForm.Visible -and $closingForm.Tag.CloseAfterPinRequest) 'Closing during pin approval must keep the message loop alive for asynchronous cancellation.'
+                if (-not $closeAccepted) { $closingForm.Tag.PinCloseDeadline = [DateTime]::UtcNow.AddSeconds(-1) }
+                Complete-EeaTaskbarPin $closingForm
+                Assert-Gui ($closingForm.IsDisposed -and $closingProcess.Disposed -and $closingProcess.Killed -eq (-not $closeAccepted)) 'Closing setup must release the pin helper even when its window is not ready to receive a close message.'
+            }
+            finally { $closingForm.Dispose() }
+        }
+        $ui.NewButton.PerformClick()
+        Assert-Gui (-not $ui.TaskbarCheck.Checked) 'New websites must not inherit a previous taskbar choice.'
+        $ui.TaskbarCheck.Checked = $true
+        $originalPreferences = $ui.Settings
+        $placementPreferences = ConvertTo-EeaSettings $originalPreferences
+        $placementPreferences.DefaultStartMenu = $false
+        try {
+            Set-EeaFormPreferences -Form $Form -Settings $placementPreferences
+            Assert-Gui ($ui.TaskbarCheck.Checked -and $ui.StartMenuCheck.Checked -and -not $ui.StartMenuCheck.Enabled) 'Changing default placement must preserve the required Start menu entry for an unsaved taskbar app.'
+        }
+        finally {
+            $ui.TaskbarCheck.Checked = $false
+            Set-EeaFormPreferences -Form $Form -Settings $originalPreferences
+        }
+        $ui.AppList.SelectedIndex = 0
+        Assert-Gui $ui.TaskbarCheck.Checked 'Selecting a saved taskbar app must restore its checkbox.'
+        $script:FailPinRequest = $true
+        $ui.SaveButton.PerformClick()
+        Assert-Gui ($ui.SaveButton.Enabled -and $ui.StatusLabel.Text -ceq 'FAILED: Synthetic Windows pin failure.' -and (Get-EeaStateTaskbar (Read-EeaManifest $Context 'My News'))) 'A Windows pin failure must preserve the saved app and allow further editing.'
+        $script:FailPinRequest = $false
+        $ui.TaskbarCheck.Checked = $false
+        $ui.SaveButton.PerformClick()
+        Assert-Gui (-not (Get-EeaStateTaskbar (Read-EeaManifest $Context 'My News')) -and $ui.StartMenuCheck.Enabled) 'Approved opt-out must restore ordinary placement controls without claiming Windows unpinned the app.'
     }
-    finally { $script:FailExplorer = $false }
-    $ui.UrlInput.Text = $savedWebsite
+    finally { $script:FailPinRequest = $false; $script:ApproveChange = $previousApproval }
     $ui.StatusLabel.Text = 'Saved: My News'
-    Write-Host 'PASS: Taskbar button selection, accessible icon, saved-shortcut handoff, unsaved edit preservation, and Explorer failure handling without taskbar changes.'
+    Write-Host 'PASS: Taskbar checkbox, profile consent, required Start entry, asynchronous pin success/decline/unavailability, save preservation, reset, selection, and opt-out without changing the actual taskbar.'
 }
 
 function New-GuiIconRequest {
-    param([byte[]]$IconData, [switch]$Fail, [string]$ResolvedWebsite)
-    $pipeline = [pscustomobject]@{ Bytes = $IconData; Fail = [bool]$Fail; Disposed = $false; Website = $ResolvedWebsite }
+    param([byte[]]$IconData, [switch]$Fail, [string]$ResolvedWebsite, [string]$FailureCode)
+    $pipeline = [pscustomobject]@{ Bytes = $IconData; Fail = [bool]$Fail; Disposed = $false; Website = $ResolvedWebsite; FailureCode = $FailureCode }
     $pipeline | Add-Member ScriptMethod EndInvoke {
         param($Pending)
         if ($this.Fail) { throw 'Synthetic website icon failure.' }
-        return [pscustomobject]@{ Bytes = $this.Bytes; SourceUrl = 'https://example.com/favicon.ico'; Website = $this.Website }
+        return [pscustomobject]@{ Bytes = $this.Bytes; SourceUrl = 'https://example.com/favicon.ico'; Website = $this.Website; FailureCode = $this.FailureCode }
     }
     $pipeline | Add-Member ScriptMethod Stop { }
     $pipeline | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
@@ -150,6 +225,16 @@ function Test-GuiWebsiteIcon {
         if ($outcome -eq 'New') { Assert-Gui ($null -eq $ui.IconPreview.Image) 'A stale lookup must not put the previous site icon into a new editor.'; $ui.AppList.SelectedIndex = 0 }
         $ui.UrlInput.Text = $originalUrl
     }
+    foreach ($failureCode in @('Blocked', 'NotFound', 'Unsupported', 'Transport', 'Timeout', 'untrusted-private-message')) {
+        $script:NextIconRequest = New-GuiIconRequest $iconData -FailureCode $failureCode
+        $request = $script:NextIconRequest
+        $ui.GetIconButton.PerformClick()
+        $request.AsyncResult.IsCompleted = $true
+        Complete-EeaWebsiteIconLookup $Form
+        Assert-Gui ($null -eq $ui.WebsiteIconData -and (Read-EeaManifest $Context 'My News').IconHash -ceq $saved.IconHash -and $request.PowerShell.Disposed -and $ui.SaveButton.Enabled) 'Categorized failures must preserve the icon and restore editor controls.'
+        Assert-Gui ($ui.StatusLabel.Text -ceq (Get-EeaWebsiteIconFailureMessage $failureCode) -and -not $ui.StatusLabel.Text.Contains('untrusted')) 'The status must use allowlisted failure text, never worker-provided prose.'
+        if ($failureCode -eq 'Blocked') { Assert-Gui ($ui.StatusLabel.Text.Contains('Choose icon')) 'Blocked retrieval must identify the manual icon alternative.' }
+    }
     Set-EeaEditorIcon -Form $Form -IconData $iconData
     $ui.ClearIconButton.PerformClick()
     Assert-Gui ($null -eq $ui.WebsiteIconData -and $ui.IconLabel.Text -ceq 'Saved icon' -and $null -ne $ui.IconPreview.Image) 'Use saved icon must discard the retrieved image and restore the saved preview.'
@@ -195,6 +280,17 @@ function Test-GuiWebsiteIcon {
     Complete-EeaWebsiteIconLookup $Form
     Assert-Gui ((Get-EeaStateFreshSession (Read-EeaManifest $Context 'My News')) -eq $savedSessionChoice -and -not $ui.StatusLabel.Text.StartsWith('Saved:')) 'Changing the privacy choice during address resolution must invalidate the pending save.'
     $ui.FreshSessionCheck.Checked = $savedSessionChoice
+    $savedTaskbarChoice = Get-EeaStateTaskbar (Read-EeaManifest $Context 'My News')
+    $ui.UrlInput.Text = $bareWebsite
+    $script:NextIconRequest = New-GuiIconRequest $iconData -ResolvedWebsite $originalUrl
+    $request = $script:NextIconRequest
+    $requestCount = $script:PinRequests.Count
+    $ui.SaveButton.PerformClick()
+    $ui.TaskbarCheck.Checked = -not $savedTaskbarChoice
+    $request.AsyncResult.IsCompleted = $true
+    Complete-EeaWebsiteIconLookup $Form
+    Assert-Gui ((Get-EeaStateTaskbar (Read-EeaManifest $Context 'My News')) -eq $savedTaskbarChoice -and $script:PinRequests.Count -eq $requestCount -and -not $ui.StatusLabel.Text.StartsWith('Saved:')) 'Changing taskbar intent during address resolution must invalidate the pending save without requesting a pin.'
+    $ui.TaskbarCheck.Checked = $savedTaskbarChoice
     $previousApproval = $script:ApproveChange
     try {
         $script:ApproveChange = $false
@@ -331,6 +427,54 @@ function Invoke-GuiFormEvent {
     [void]$methodInfo.Invoke($Form, [object[]]@([EventArgs]::Empty))
 }
 
+function Test-GuiSpaceComposition {
+    param($Form)
+    $originalSize = $Form.ClientSize
+    $Form.MotionEnabled = $false
+    try {
+        foreach ($size in @((New-Object Drawing.Size(1936, 1089)), (New-Object Drawing.Size(3840, 2160)))) {
+            $Form.ClientSize = $size
+            $Form.PerformLayout()
+            $Form.RefreshScene()
+            $bitmap = New-Object Drawing.Bitmap($size.Width, $size.Height)
+            $graphics = [Drawing.Graphics]::FromImage($bitmap)
+            $surface = $Form.Tag.EditorViewport
+            $fragment = New-Object Drawing.Bitmap($surface.Width, $surface.Height)
+            $fragmentGraphics = [Drawing.Graphics]::FromImage($fragment)
+            try {
+                Assert-Gui ($Form.PaintScene($Form, $graphics)) 'A realized large window must have a paintable background.'
+                foreach ($corner in @((New-Object Drawing.Point(0, 0)), (New-Object Drawing.Point(($size.Width - 1), ($size.Height - 1))))) {
+                    Assert-Gui ($bitmap.GetPixel($corner.X, $corner.Y).A -eq 255) 'Scaled starfield edges must remain fully opaque.'
+                }
+                $clip = New-Object Drawing.Rectangle(13, 17, 96, 80)
+                $sentinel = [Drawing.Color]::Magenta
+                $fragmentGraphics.Clear($sentinel)
+                $originalInterpolation = $fragmentGraphics.InterpolationMode
+                $originalOffset = $fragmentGraphics.PixelOffsetMode
+                $originalCompositing = $fragmentGraphics.CompositingMode
+                Assert-Gui ($Form.PaintScene($surface, $fragmentGraphics, $clip)) 'Partial invalidation must paint the requested scene fragment.'
+                Assert-Gui ($fragmentGraphics.InterpolationMode -eq $originalInterpolation -and $fragmentGraphics.PixelOffsetMode -eq $originalOffset -and $fragmentGraphics.CompositingMode -eq $originalCompositing) 'Background painting must restore graphics state for foreground controls.'
+                Assert-Gui ($fragment.GetPixel(0, 0).ToArgb() -eq $sentinel.ToArgb() -and $fragment.GetPixel($clip.Right, $clip.Bottom).ToArgb() -eq $sentinel.ToArgb()) 'Partial painting must not touch pixels outside the invalid rectangle.'
+                $origin = $Form.PointToClient($surface.PointToScreen([Drawing.Point]::Empty))
+                for ($vertical = $clip.Top; $vertical -lt $clip.Bottom; $vertical += 3) {
+                    for ($horizontal = $clip.Left; $horizontal -lt $clip.Right; $horizontal += 3) {
+                        Assert-Gui ($fragment.GetPixel($horizontal, $vertical).ToArgb() -eq $bitmap.GetPixel($origin.X + $horizontal, $origin.Y + $vertical).ToArgb()) 'Nested and clipped surfaces must sample the same scene pixels without seams.'
+                    }
+                }
+                $paintField = $Form.GetType().GetField('paintMilliseconds', [Reflection.BindingFlags]'Instance, NonPublic')
+                Assert-Gui ($null -ne $paintField -and $paintField.GetValue($Form) -gt 0) 'The frame budget must account for actual background painting as well as generation.'
+                $paintField.SetValue($Form, [double]40)
+                $Form.RefreshScene()
+                $timer = $Form.GetType().GetField('animationTimer', [Reflection.BindingFlags]'Instance, NonPublic').GetValue($Form)
+                Assert-Gui ($timer.Interval -eq 100 -and $paintField.GetValue($Form) -eq 0) 'An expensive painted frame must back off within the existing interval limit and reset its cost for the next frame.'
+            }
+            finally { $fragmentGraphics.Dispose(); $fragment.Dispose(); $graphics.Dispose(); $bitmap.Dispose() }
+        }
+    }
+    finally { $Form.ClientSize = $originalSize }
+    Write-Host 'PASS: Above-cap and 4K scene opacity, clipped paint, panel alignment, and graphics-state restoration.'
+}
+
 function Test-GuiSpaceLifecycle {
     param($Form)
     $preferences = $Form.GetType().GetMethod('ApplyPreferences', [Reflection.BindingFlags]'Instance, NonPublic')
@@ -422,8 +566,51 @@ function Assert-ControlLayout {
     }
 }
 
+function Test-GuiSavedStartup {
+    $startupContext = [pscustomobject]@{
+        Root = Join-Path $testRoot 'StartupSettings'
+        Desktop = Join-Path $testRoot 'StartupDesktop'
+        Programs = Join-Path $testRoot 'StartupPrograms'
+    }
+    foreach ($pointSize in @(12, 14, 16, 18)) {
+        $settings = New-EeaSettings
+        $settings.TextSize = $pointSize
+        $settings.MotionEnabled = $false
+        $null = Save-EeaSettings -Settings $settings -Context $startupContext -Confirm:$false
+        $startup = New-EeaSetupForm -Context $startupContext
+        try {
+            $startup.StartPosition = [Windows.Forms.FormStartPosition]::Manual
+            $startup.Location = New-Object Drawing.Point(-10000, -10000)
+            $startup.ShowInTaskbar = $false
+            $startup.Show()
+            [Windows.Forms.Application]::DoEvents()
+            $viewport = $startup.Tag.EditorViewport
+            $workArea = [Windows.Forms.Screen]::FromControl($startup).WorkingArea
+            Assert-Gui ($startup.Width -le $workArea.Width -and $startup.Height -le $workArea.Height) 'Saved-font startup must fit the current monitor working area.'
+            Assert-Gui ($startup.ActiveControl -eq $startup.Tag.NameInput) 'Fresh startup must put keyboard focus in the website name.'
+            $requiredGrowth = [Math]::Max(0, $viewport.AutoScrollMinSize.Height - $viewport.ClientSize.Height)
+            if ($startup.Height + $requiredGrowth -lt $workArea.Height) {
+                Assert-Gui (-not $viewport.VerticalScroll.Visible) ('Saved-font startup must avoid scrolling when the screen has room: ' + $pointSize)
+                $saveBounds = $viewport.RectangleToClient($startup.Tag.SaveButton.RectangleToScreen($startup.Tag.SaveButton.ClientRectangle))
+                Assert-Gui ($viewport.ClientRectangle.Contains($saveBounds)) 'The primary action must be visible immediately after saved-font startup.'
+            }
+            $smallArea = New-Object Drawing.Rectangle(-10000, -10000, 900, 650)
+            Set-EeaSetupWindowSize -Form $startup -WorkingArea $smallArea -Center
+            Assert-Gui ($smallArea.Contains($startup.Bounds)) 'A smaller working area must clamp minimum size and keep the whole window reachable.'
+            Assert-Gui $viewport.VerticalScroll.Visible 'Compact displays must retain the editor scrolling fallback.'
+            $startup.ActiveControl = $startup.Tag.UrlInput
+            $settings.TextSize = 18
+            Set-EeaFormPreferences -Form $startup -Settings $settings
+            Assert-Gui ($startup.Width -le $workArea.Width -and $startup.Height -le $workArea.Height -and $startup.ActiveControl -eq $startup.Tag.UrlInput) 'Preference scaling must fit the monitor without moving keyboard focus.'
+        }
+        finally { $startup.Dispose() }
+    }
+    Write-Host 'PASS: Saved-font startup, monitor bounds, initial focus, compact scrolling, and preference resizing.'
+}
+
 try {
     Test-GuiNativeTypeReload
+    Test-GuiSavedStartup
     $form = New-EeaSetupForm -Context $context
     $form.StartPosition = [Windows.Forms.FormStartPosition]::Manual
     $form.Location = New-Object Drawing.Point(-10000, -10000)
@@ -432,11 +619,11 @@ try {
     [Windows.Forms.Application]::DoEvents()
     $ui = $form.Tag
     Assert-Gui (-not (Test-Path -LiteralPath $context.Root)) 'Opening setup must not create app data.'
-    Assert-Gui (-not $ui.PinButton.Enabled) 'Taskbar pinning must remain unavailable until a saved website is selected.'
+    Assert-Gui (-not $ui.TaskbarCheck.Checked) 'Taskbar placement must be opt-in for a new website.'
     Assert-Gui (-not $ui.FreshSessionCheck.Checked -and $ui.FreshSessionCheck.AccessibleDescription.Contains('cookies, cache') -and $ui.FreshSessionCheck.Image.Tag -ceq 'Privacy') 'Fresh sessions must be an accessible, clearly described opt-in website setting.'
-    $ui.PinButton.PerformClick()
-    Assert-Gui ($script:ExplorerRequests.Count -eq 0) 'The disabled pin command must not open Explorer.'
+    Assert-Gui ($script:PinRequests.Count -eq 0) 'Opening setup must not request a taskbar pin.'
     Test-GuiSpaceRenderer
+    Test-GuiSpaceComposition $form
     Test-GuiSpaceLifecycle $form
     Assert-Gui ($ui.AppList.Items.Count -eq 0) 'New setup should have no websites.'
     Assert-Gui ($null -ne $form.Icon -and $form.Icon.Width -eq 64 -and $ui.BrandPicture.Image.Width -eq 64) 'Use the embedded logo for the application icon and header.'
@@ -549,12 +736,12 @@ try {
         if ($pointSize -eq 12) {
             $ui.EditorViewport.AutoScrollPosition = New-Object Drawing.Point(0, 0)
             [Windows.Forms.Application]::DoEvents()
-            foreach ($control in @($ui.FreshSessionCheck, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+            foreach ($control in @($ui.TaskbarCheck, $ui.FreshSessionCheck, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
                 $bounds = $ui.EditorViewport.RectangleToClient($control.RectangleToScreen($control.ClientRectangle))
                 Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($bounds)) ('Default layout must show the privacy choice and website actions without scrolling: ' + $control.Text)
             }
         }
-        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.PinButton, $ui.FreshSessionCheck, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.TaskbarCheck, $ui.FreshSessionCheck, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
             $ui.EditorViewport.ScrollControlIntoView($requiredControl)
             [Windows.Forms.Application]::DoEvents()
             $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
@@ -576,11 +763,11 @@ try {
             finally { $capture.Dispose() }
         }
         $savedStatus = $ui.StatusLabel.Text
-        $ui.PinButton.PerformClick()
+        $ui.StatusLabel.Text = 'Saved. Windows could not offer a taskbar pin.'
         $form.PerformLayout()
         [Windows.Forms.Application]::DoEvents()
         Assert-ControlLayout $form
-        foreach ($requiredControl in @($ui.NotesInput, $ui.PinButton, $ui.SaveButton)) {
+        foreach ($requiredControl in @($ui.NotesInput, $ui.TaskbarCheck, $ui.SaveButton)) {
             $ui.EditorViewport.ScrollControlIntoView($requiredControl)
             [Windows.Forms.Application]::DoEvents()
             $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
@@ -592,7 +779,7 @@ try {
     $ui.NewButton.PerformClick()
     Assert-Gui (-not $ui.NameInput.ReadOnly -and $ui.NameInput.Text -eq '') 'New website must reset the editor.'
     Assert-Gui ($ui.SaveButton.Image.Tag -ceq 'Add') 'A new app must restore the add command icon.'
-    Assert-Gui (-not $ui.OpenButton.Enabled -and -not $ui.RemoveButton.Enabled -and -not $ui.PinButton.Enabled) 'New website must not act on the previous selection.'
+    Assert-Gui (-not $ui.OpenButton.Enabled -and -not $ui.RemoveButton.Enabled -and -not $ui.TaskbarCheck.Checked) 'New website must not act on the previous selection.'
     $ui.NameInput.Text = 'My News'
     $ui.UrlInput.Text = 'https://example.com/unwanted-change'
     $ui.SaveButton.PerformClick()
@@ -601,7 +788,7 @@ try {
     $script:ApproveChange = $true
     $ui.RemoveButton.PerformClick()
     Assert-Gui ($ui.AppList.Items.Count -eq 0) 'Confirmed removal must refresh the list.'
-    Assert-Gui (-not $ui.PinButton.Enabled) 'Removing a website must disable the taskbar command for that selection.'
+    Assert-Gui (-not $ui.TaskbarCheck.Checked) 'Removing a website must clear its taskbar choice from the editor.'
     Assert-Gui ($null -eq (Read-EeaManifest $context 'My News')) 'Confirmed removal must remove owned settings.'
     $ui.UrlInput.Text = 'https://example.com/'
     $script:NextIconRequest = New-GuiIconRequest ([byte[]]@(0))

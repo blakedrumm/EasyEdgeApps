@@ -373,6 +373,50 @@ function Test-WebsiteIconLookup {
     finally { $client.Dispose() }
 }
 
+function Test-WebsiteIconFailureResults {
+    foreach ($failureCode in @('Blocked', 'NotFound', 'Unsupported', 'Transport', 'Timeout', 'Mixed')) {
+        foreach ($useWorker in @($false, $true)) {
+            $handler = New-Object EasyEdgeAppsWebsiteIconTests.Handler
+            $client = New-Object Net.Http.HttpClient($handler)
+            $request = $null
+            try {
+                if ($failureCode -eq 'Transport') { $handler.NextFailure = New-Object Net.Http.HttpRequestException('private-network-detail') }
+                elseif ($failureCode -eq 'Timeout') { $handler.NextFailure = New-Object Threading.Tasks.TaskCanceledException('private-timeout-detail') }
+                else {
+                    $pageStatus = if ($failureCode -eq 'Blocked') { 403 } else { 200 }
+                    $html = if ($failureCode -eq 'Mixed') { '<link rel=icon href="/invalid.png"><link rel=icon href="/blocked.ico">' } else { 'private-response-body' }
+                    $handler.Responses.Enqueue((New-WebsiteIconResponse ([Text.Encoding]::UTF8.GetBytes($html)) 'text/html' $pageStatus))
+                }
+                if ($failureCode -eq 'Mixed') {
+                    $handler.Responses.Enqueue((New-WebsiteIconResponse ([Text.Encoding]::UTF8.GetBytes('not an image'))))
+                    $handler.Responses.Enqueue((New-WebsiteIconResponse ([byte[]]@()) 'text/html' 403))
+                }
+                $iconStatus = if ($failureCode -eq 'Blocked') { 403 } elseif ($failureCode -eq 'Unsupported') { 200 } else { 404 }
+                $handler.Responses.Enqueue((New-WebsiteIconResponse ([Text.Encoding]::UTF8.GetBytes('private-response-body')) 'text/html' $iconStatus))
+                $expected = if ($failureCode -eq 'Mixed') { 'Blocked' } else { $failureCode }
+                if ($useWorker) {
+                    $request = Start-EeaWebsiteIconRequest -Website 'https://site.example/private' -Client $client
+                    $result = @($request.PowerShell.EndInvoke($request.AsyncResult))
+                    Assert-WebsiteIcon ($result.Count -eq 1 -and $request.PowerShell.Streams.Error.Count -eq 0 -and $request.PowerShell.InvocationStateInfo.State -eq 'Completed' -and $result[0].FailureCode -ceq $expected -and $null -eq $result[0].Bytes) 'The worker must return a stable failure category without leaking exceptions or replacing icon bytes.'
+                }
+                else {
+                    $failure = $null
+                    try { $null = Get-EeaWebsiteIcon -Website 'https://site.example/private' -Client $client }
+                    catch { $failure = $_.Exception }
+                    Assert-WebsiteIcon ($null -ne $failure -and (Get-EeaWebsiteIconFailureCode $failure) -ceq $expected) 'Direct lookup must preserve its throwing API and expose the same failure category as the worker.'
+                }
+                $message = Get-EeaWebsiteIconFailureMessage $expected
+                Assert-WebsiteIcon (-not $message.Contains('private') -and -not $handler.SawCredentials -and $handler.Requests.Count -eq $(if ($failureCode -eq 'Mixed') { 4 } else { 2 })) 'Classified failures must remain credential-free, avoid guessed URLs, and suppress private response details.'
+            }
+            finally {
+                if ($null -ne $request) { $request.PowerShell.Dispose(); $request.Cancellation.Dispose() }
+                $client.Dispose()
+            }
+        }
+    }
+    Write-Host 'PASS: Direct and worker blocked, missing, unsupported, transport, timeout, and mixed-failure classification without private details or extra probes.'
+}
+
 function Test-WebsiteIconWorker {
     param([byte[]]$PngBytes)
     $handler = New-Object EasyEdgeAppsWebsiteIconTests.Handler
@@ -480,6 +524,7 @@ try {
     Test-WebsiteIconLargeImage
     Test-WebsiteIconSvg
     Test-WebsiteIconLookup $pngBytes
+    Test-WebsiteIconFailureResults
     Test-WebsiteIconWorker $pngBytes
     Write-Host ('PASS: ICO, PNG, PNG-only ICO, native rendering, transparency, and bounded image validation on PowerShell ' + $PSVersionTable.PSVersion + '.')
 }

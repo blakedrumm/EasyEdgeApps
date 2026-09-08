@@ -1,10 +1,10 @@
 # Command-Line Automation
 
-These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.3.2. Unattended commands and selected kit imports remain compatible with version 1.2.0; per-app launch-profile overrides require 1.3.0, and fresh-session choices require 1.3.2. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
+These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.3.3. Unattended commands and selected kit imports remain compatible with version 1.2.0; per-app launch-profile overrides require 1.3.0, fresh-session choices require 1.3.2, and Guest-mode fresh launchers require 1.3.3. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
 
 Run as the Windows user whose shortcuts you intend to manage, not as SYSTEM, an administrator, or a different helper account. The portable application is still one script; the optional MSI installs that same script and a graphical manager launcher. No module, service, or scheduled task is installed. Automate the script directly, not the MSI launcher, which accepts no forwarded options.
 
-Taskbar pinning assistance is a setup-window command that opens the saved shortcut in File Explorer for a manual Windows pin action. There is no unattended pinning action or taskbar placement flag, and App Kits do not contain taskbar pins.
+The setup window's **Taskbar** checkbox requests a real Windows-approved pin and selects a dedicated app profile/window identity. There is no public CLI taskbar switch or unattended pinning action. CLI updates and repair preserve an existing Taskbar choice without requesting pins; `-NoStartMenu` is rejected for such apps. App Kits do not contain Taskbar intent or Windows pin state. See the [taskbar workflow](../README.md#pin-a-website-to-the-taskbar).
 
 For built-in help, run `.\EasyEdgeApps.ps1 --help`, `.\EasyEdgeApps.ps1 -h`, or `.\EasyEdgeApps.ps1 -?`. `-Help` is also supported. Each example explains its scenario and effects; `--help`, `-h`, and `-Help` use compact spacing, while `-?` retains PowerShell's native formatting. Help does not open setup or perform an operation. Use `-h`, `-Help`, or `-?` when combining help with an explicit `-Action`.
 
@@ -82,7 +82,7 @@ An explicit value overrides the app's saved choice. Without `-EdgeProfile`, an e
 Install accepts `-SessionMode Fresh` or `-SessionMode Normal`. Omission preserves an existing website's choice; new websites default to Normal. This option is not accepted by Open or other actions: Open always uses the saved mode.
 
 ```powershell
-# Start this website with an empty independent profile on every launch.
+# Start this website with an empty independent Guest profile on every launch.
 .\EasyEdgeApps.ps1 -Action Install -Name 'Shared website' -Url 'https://example.com/' -SessionMode Fresh -Unattended
 .\EasyEdgeApps.ps1 -Action Open -Name 'Shared website' -Unattended
 
@@ -90,13 +90,15 @@ Install accepts `-SessionMode Fresh` or `-SessionMode Normal`. Omission preserve
 .\EasyEdgeApps.ps1 -Action Install -Name 'Shared website' -Url 'https://example.com/' -SessionMode Normal -Unattended
 ```
 
-`-Unattended` approves the mode change, including returning to persistent storage. `-WhatIf` does not compile a launcher or create app data. An omitted or explicit `-EdgeProfile` is still saved normally but is not used while Fresh is enabled; disabling Fresh restores that normal-profile choice.
+`-Unattended` approves the mode change, including returning to persistent storage. `-WhatIf` does not compile a launcher or create app data. An omitted or explicit `-EdgeProfile` is still saved normally but is not used while Fresh or Taskbar is enabled. Disabling Fresh while Taskbar stays selected opens the website's dedicated persistent app profile; the normal-profile choice is used only when both options are off.
 
-Fresh launches use a locally compiled, no-argument Windows executable, not a PowerShell session. It creates a unique temporary Edge profile each time and removes that profile after its browser process tree ends. Cookies, cache, and site data are not reused across launches. Normal Edge data and downloaded files remain; sign-ins may need repeating, and OS/site SSO is not disabled. Persistent cleanup failures show a warning and leave marked data for retry on a later fresh launch, never for reuse. This is not secure erasure.
+Fresh launches use a locally compiled, no-argument Windows executable, not a PowerShell session. It creates a unique temporary Edge Guest profile each time and removes that profile after its browser process tree ends. Guest mode prevents Edge browser-account sign-in and sync; website sign-in remains available. Cookies, cache, and site data are not reused across launches. Normal Edge data and downloaded files remain; website sign-ins may need repeating, and OS/site SSO is not guaranteed to be disabled. Persistent cleanup failures show a warning and leave marked data for retry on a later fresh launch, never for reuse. This is not secure erasure.
 
-Saving, importing, and repairing Fresh websites require the Windows .NET Framework compiler. Browsing requires a non-elevated interactive user session. A `UserDataDir` policy override or application-control restriction can block launch; there is no policy bypass or normal-profile fallback. Close fresh windows before updating/removing the website. CLI Open returns after starting the launcher, not after browsing or cleanup; exit 0 is not proof of session completion.
+Saving, importing, and repairing Fresh websites require the Windows .NET Framework compiler. Browsing requires a non-elevated interactive user session and available Guest mode. A `UserDataDir` override, disabled `BrowserGuestModeEnabled`, forced `BrowserSignin`, or application-control restriction can block launch; there is no policy bypass or normal-profile fallback. Close fresh windows before updating/removing the website. CLI Open returns after starting the launcher, not after browsing or cleanup; exit 0 is not proof of session completion.
 
-Exports containing any fresh website use kit schema 2, which requires 1.3.2 or later. Schema 2 applies each stored Boolean choice, including false; preview and review before unattended import. Schema 1 preserves existing destination session choices, defaults new apps to Normal, and remains the export format for entirely normal kits. No executable, source, browser data, or local profile selection travels. Taskbar pins must be recreated from the new owned shortcut after a mode change; directly pinning Edge can bypass freshness.
+After upgrading from 1.3.2, use `-Action Check` and an approved `-Action Repair -AppNames 'Shared website' -Unattended` to rebuild existing fresh-session launchers with Guest mode. MSI maintenance does not rebuild them, and Open does not silently replace them. Repair preserves saved URLs, normal-profile choices, and the Fresh setting.
+
+Exports containing any fresh website use kit schema 2, which requires 1.3.2 or later. Schema 2 applies each stored Boolean choice, including false; preview and review before unattended import. Schema 1 preserves existing destination session choices, defaults new apps to Normal, and remains the export format for entirely normal kits. No executable, source, browser data, local profile selection, or Taskbar choice travels. A kit that would remove an existing taskbar app's Start entry conflicts during preflight. New/repaired local Fresh or Taskbar manifests use schema 3 and require 1.3.3 or later; this does not change the kit schemas. Unpin old Edge-targeting entries and use the setup checkbox for verified launcher pins.
 
 ## Process invocation
 

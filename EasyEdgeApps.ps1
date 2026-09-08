@@ -41,12 +41,14 @@ an override, existing apps retain their saved profile and new apps use Settings.
 For Favorites actions, this selects the local profile to read, not a launch profile.
 .PARAMETER SessionMode
 For Install, Fresh creates a Windows launcher that uses an empty temporary Edge
-profile on every launch and removes its cookies, cache, and site data after that
-browser process tree exits. Normal restores persistent browsing. Omit this option
+Guest profile on every launch, without browser account sign-in or sync, and removes
+its cookies, cache, and site data after that browser process tree exits.
+Normal restores persistent browsing. Omit this option
 to retain an existing website's choice; new websites default to Normal.
 Crash or file-lock leftovers are never reused; a later fresh launch retries cleanup.
 Normal Edge profile data and downloaded files are not cleared. Fresh sessions
-require non-elevated Windows and the Windows .NET Framework compiler at setup.
+require non-elevated Windows, available Guest mode, and the Windows .NET Framework
+compiler at setup. After upgrading, use Check and Repair for older fresh launchers.
 .EXAMPLE
 .\EasyEdgeApps.ps1
 
@@ -72,7 +74,7 @@ Back up the current user's saved websites for a replacement computer. Exports al
 
 Restore only My Mail from a previously reviewed, trusted App Kit. Adds or updates that named app for the current Windows user and leaves unselected apps alone. -Unattended approves the selected changes without prompts but retains validation and ownership checks. Run with -Preview first to review destinations without installing. Sign in to the website separately after restoring its shortcuts.
 .NOTES
-Version: 1.3.2
+Version: 1.3.3
 Author: Blake Drumm (blakedrumm@microsoft.com)
 Created: 2026-09-07
 Last Modified: 2026-09-08
@@ -281,9 +283,10 @@ function Get-EeaByteHash {
 
 function Get-EeaSessionLauncherSource {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Website, [Parameter(Mandatory = $true)][string]$EdgePath)
+    param([Parameter(Mandatory = $true)][string]$Website, [Parameter(Mandatory = $true)][string]$EdgePath, [string]$AppName = '', [bool]$FreshSession = $true)
 
     $cleanWebsite = ConvertTo-EeaWebsite $Website
+    $cleanName = if ($AppName) { ConvertTo-EeaName $AppName } else { '' }
     if (-not [IO.Path]::IsPathRooted($EdgePath) -or [IO.Path]::GetFileName($EdgePath) -ine 'msedge.exe' -or $EdgePath -match '["\r\n]') { throw 'The Edge executable path is invalid.' }
     $source = @'
 using System;
@@ -302,16 +305,30 @@ public static class EeaFreshSession
 {
     private const string Marker = "EasyEdgeApps.FreshSession:1";
     private const string MarkerFile = ".eea-session";
+    private const bool FreshMode = __EEA_FRESH__;
 
     [STAThread]
     private static int Main(string[] arguments)
     {
         try
         {
-            if (arguments.Length != 0) throw new InvalidOperationException("Unexpected launcher arguments.");
+            bool pinRequest = arguments.Length == 1 && arguments[0] == "--pin";
+            bool pinState = arguments.Length == 1 && arguments[0] == "--pin-state";
+            if (arguments.Length != 0 && !pinRequest && !pinState) throw new InvalidOperationException("Unexpected launcher arguments.");
             string edge = Encoding.UTF8.GetString(Convert.FromBase64String("__EEA_EDGE__"));
             string website = Encoding.UTF8.GetString(Convert.FromBase64String("__EEA_URL__"));
+            string name = Encoding.UTF8.GetString(Convert.FromBase64String("__EEA_NAME__"));
             string root = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "Sessions");
+            if (name.Length != 0) EasyEdgeApps.Taskbar.Native.SetProcessIdentity(AppId(root));
+            AppName = name;
+            CheckCurrentUser();
+            if (pinRequest || pinState)
+            {
+                if (name.Length == 0) throw new InvalidOperationException("This launcher has no website identity.");
+                if (pinState) return GetPinState();
+                return ConfirmPinResult(RequestPin(), GetPinState());
+            }
+            if (!FreshMode) { RunPersistent(Path.Combine(Path.GetDirectoryName(root), "AppProfile"), edge, website); return 0; }
             if (!Run(root, edge, website))
             {
                 MessageBox.Show("Some temporary website data could not be removed. It will never be reused. Cleanup will be retried next time this website opens.", "Easy Edge Apps", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -321,12 +338,18 @@ public static class EeaFreshSession
         }
         catch
         {
-            MessageBox.Show("The fresh session could not start or finish safely. No normal-profile fallback was requested. Ask your helper to check Edge, browser policies, and this website's saved shortcuts.", "Easy Edge Apps", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (arguments.Length == 1 && (arguments[0] == "--pin" || arguments[0] == "--pin-state")) return 4;
+            MessageBox.Show("The website app could not start or finish safely. No normal-profile fallback was requested. Ask your helper to check Edge availability, browser policies, and this website's saved shortcuts.", "Easy Edge Apps", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
     }
 
     public static void CheckPolicy()
+    {
+        CheckPolicy(true);
+    }
+
+    private static void CheckPolicy(bool fresh)
     {
         foreach (RegistryView view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
         foreach (RegistryHive hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser })
@@ -334,9 +357,21 @@ public static class EeaFreshSession
         foreach (string suffix in new[] { "", "\\Recommended" })
         using (RegistryKey key = baseKey.OpenSubKey("Software\\Policies\\Microsoft\\Edge" + suffix))
         {
-            if (key != null && key.GetValue("UserDataDir", null, RegistryValueOptions.DoNotExpandEnvironmentNames) != null)
-                throw new InvalidOperationException("Edge UserDataDir policy prevents a verified isolated profile.");
+            if (key == null) continue;
+            object userData = key.GetValue("UserDataDir", null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+            if (fresh) CheckPolicyValues(userData, key.GetValue("BrowserGuestModeEnabled", null), key.GetValue("BrowserSignin", null));
+            else if (userData != null) throw new InvalidOperationException("Edge UserDataDir policy prevents a verified app profile.");
         }
+    }
+
+    public static void CheckPolicyValues(object userDataDirectory, object guestModeEnabled, object browserSignin)
+    {
+        if (userDataDirectory != null)
+            throw new InvalidOperationException("Edge UserDataDir policy prevents a verified isolated profile.");
+        if (guestModeEnabled != null && !Object.Equals(guestModeEnabled, 1))
+            throw new InvalidOperationException("Edge guest mode is unavailable by policy.");
+        if (browserSignin != null && !Object.Equals(browserSignin, 0) && !Object.Equals(browserSignin, 1))
+            throw new InvalidOperationException("Edge browser sign-in policy prevents a verified guest session.");
     }
 
     public static void CheckPath(string path)
@@ -355,6 +390,8 @@ public static class EeaFreshSession
 
     private static string JobName(string directory)
     {
+        if (Path.GetFileName(directory) == "AppProfile")
+            return "Local\\EasyEdgeApps-App-" + AppId(Path.Combine(Path.GetDirectoryName(directory), "Sessions"));
         return "Local\\EasyEdgeApps-Fresh-" + Path.GetFileName(directory);
     }
 
@@ -461,22 +498,32 @@ public static class EeaFreshSession
 
     public static string Arguments(string website, string directory)
     {
+        return Arguments(website, directory, true);
+    }
+
+    public static string Arguments(string website, string directory, bool fresh)
+    {
         Uri address;
         if (website.Length > 2048 || !Uri.TryCreate(website, UriKind.Absolute, out address) ||
             (address.Scheme != "https" && address.Scheme != "http") || address.UserInfo.Length != 0 ||
             Regex.IsMatch(website, "[\\s\\p{Cc}\\p{Cf}\"\\\\]")) throw new InvalidOperationException("Invalid session website.");
         if (!Path.IsPathRooted(directory) || directory.IndexOf('"') >= 0) throw new InvalidOperationException("Invalid session directory.");
         return "--app=\"" + website + "\" --start-maximized --user-data-dir=\"" + directory +
-            "\" --no-first-run --no-default-browser-check --disable-background-mode";
+            "\"" + (fresh ? " --guest" : "") + " --no-first-run --no-default-browser-check --disable-background-mode";
     }
 
-    public static bool Run(string root, string executable, string website)
+    private static void CheckCurrentUser()
     {
         using (System.Security.Principal.WindowsIdentity identity = System.Security.Principal.WindowsIdentity.GetCurrent())
         {
             if (identity.IsSystem || new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
-                throw new InvalidOperationException("Fresh sessions require a non-elevated user session.");
+                throw new InvalidOperationException("Website apps require a non-elevated user session.");
         }
+    }
+
+    public static bool Run(string root, string executable, string website)
+    {
+        CheckCurrentUser();
         CheckPolicy();
         CheckPath(root);
         if (!File.Exists(executable)) throw new FileNotFoundException("Edge is unavailable.");
@@ -494,6 +541,151 @@ public static class EeaFreshSession
             CleanupAfterExit(root, directory);
         }
         return !Directory.Exists(directory);
+    }
+
+    public static FileStream OpenAppProfile(string directory)
+    {
+        const string profileMarker = "EasyEdgeApps.AppProfile:1";
+        CheckPath(directory);
+        bool exists = Directory.Exists(directory);
+        Directory.CreateDirectory(directory);
+        string marker = Path.Combine(directory, ".eea-app-profile");
+        CheckPath(marker);
+        FileStream lease = new FileStream(marker, exists ? FileMode.Open : FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        try
+        {
+            byte[] expected = Encoding.ASCII.GetBytes(profileMarker);
+            if (!exists) { lease.Write(expected, 0, expected.Length); lease.Flush(true); }
+            else
+            {
+                if (lease.Length != expected.Length) throw new InvalidOperationException("The app profile is not recognized.");
+                foreach (byte value in expected)
+                    if (lease.ReadByte() != value) throw new InvalidOperationException("The app profile is not recognized.");
+            }
+            return lease;
+        }
+        catch { lease.Dispose(); throw; }
+    }
+
+    public static void RunPersistent(string directory, string executable, string website)
+    {
+        CheckCurrentUser();
+        CheckPolicy(false);
+        CheckPath(directory);
+        if (!File.Exists(executable)) throw new FileNotFoundException("Edge is unavailable.");
+        string appId = AppId(Path.Combine(Path.GetDirectoryName(directory), "Sessions"));
+        using (System.Threading.Mutex mutex = new System.Threading.Mutex(false, "Local\\EasyEdgeApps-AppWindow-" + appId))
+        {
+            bool acquired;
+            try { acquired = mutex.WaitOne(0); }
+            catch (System.Threading.AbandonedMutexException) { acquired = true; }
+            if (!acquired)
+            {
+                IntPtr existingJob = OpenJobObject(4, false, JobName(directory));
+                if (existingJob == IntPtr.Zero) return;
+                try { EasyEdgeApps.Taskbar.Native.FocusJobWindow(existingJob, appId); }
+                finally { CloseHandle(existingJob); }
+                return;
+            }
+            try
+            {
+                using (FileStream lease = OpenAppProfile(directory))
+                    RunProcess(executable, Arguments(website, Path.Combine(directory, "Profile"), false), directory);
+            }
+            finally { mutex.ReleaseMutex(); }
+        }
+    }
+
+    public static int ConfirmPinResult(int requestResult, int pinState)
+    {
+        return pinState == 0 ? 0 : (requestResult == 3 && pinState == 3 ? 3 : 4);
+    }
+
+    private static int GetPinState()
+    {
+        if (!EasyEdgeApps.Taskbar.Native.SupportsPinRequests()) return 4;
+        using (EasyEdgeApps.Taskbar.Native.PinClient client = new EasyEdgeApps.Taskbar.Native.PinClient())
+        using (EasyEdgeApps.Taskbar.Native.PinOperation operation = client.CheckPinned())
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!operation.IsCompleted && DateTime.UtcNow < deadline)
+            {
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(10);
+            }
+            return operation.IsCompleted ? (operation.Result ? 0 : 3) : 4;
+        }
+    }
+
+    private static int RequestPin()
+    {
+        int result = 3;
+        using (Form form = new Form())
+        using (Timer timer = new Timer())
+        using (EasyEdgeApps.Taskbar.Native.PinClient client = new EasyEdgeApps.Taskbar.Native.PinClient())
+        {
+            EasyEdgeApps.Taskbar.Native.PinOperation operation = null;
+            bool requesting = false;
+            DateTime deadline = DateTime.UtcNow.AddMinutes(2);
+            form.Text = AppName;
+            form.ClientSize = new System.Drawing.Size(420, 110);
+            form.Font = new System.Drawing.Font("Segoe UI", 12);
+            form.StartPosition = FormStartPosition.CenterScreen;
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            string iconPath = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "icon.ico");
+            CheckPath(iconPath);
+            if (File.Exists(iconPath)) form.Icon = new System.Drawing.Icon(iconPath);
+            Label label = new Label();
+            label.Text = "Taskbar pin pending.";
+            label.AutoSize = true;
+            label.Location = new System.Drawing.Point(18, 18);
+            form.Controls.Add(label);
+            Button cancel = new Button();
+            cancel.Text = "Cancel";
+            cancel.AutoSize = true;
+            cancel.Location = new System.Drawing.Point(305, 62);
+            cancel.Click += delegate { result = 3; form.Close(); };
+            form.Controls.Add(cancel);
+            form.CancelButton = cancel;
+            timer.Interval = 100;
+            timer.Tick += delegate
+            {
+                try
+                {
+                    if (DateTime.UtcNow >= deadline) { result = 4; form.Close(); return; }
+                    if (operation == null) { operation = client.CheckPinned(); return; }
+                    if (!operation.IsCompleted) return;
+                    bool pinned = operation.Result;
+                    operation.Dispose();
+                    operation = null;
+                    if (pinned) { result = 0; form.Close(); return; }
+                    if (requesting) { result = 3; form.Close(); return; }
+                    if (!client.IsPinningAllowed) return;
+                    requesting = true;
+                    operation = client.RequestPin();
+                }
+                catch { result = 4; form.Close(); }
+            };
+            form.Shown += delegate { form.Activate(); timer.Start(); };
+            try { Application.Run(form); }
+            finally { timer.Stop(); if (operation != null) operation.Dispose(); if (form.Icon != null) form.Icon.Dispose(); }
+        }
+        return result;
+    }
+
+    private static string AppName = "";
+
+    public static string AppId(string root)
+    {
+        string identity = Path.GetFileName(Path.GetDirectoryName(root));
+        if (!Regex.IsMatch(identity, "\\A[a-f0-9]{64}\\z"))
+        {
+            using (System.Security.Cryptography.SHA256 hash = System.Security.Cryptography.SHA256.Create())
+                identity = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(root).ToUpperInvariant()))).Replace("-", "").ToLowerInvariant();
+        }
+        return "EasyEdgeApps.Website." + identity;
     }
 
     public static void RunProcess(string executable, string arguments, string directory)
@@ -527,8 +719,16 @@ public static class EeaFreshSession
                 uint message;
                 UIntPtr key;
                 IntPtr overlapped;
-                if (!GetQueuedCompletionStatus(completion, out message, out key, out overlapped, UInt32.MaxValue)) throw new Win32Exception();
+                if (!GetQueuedCompletionStatus(completion, out message, out key, out overlapped, AppName.Length == 0 ? UInt32.MaxValue : 250))
+                {
+                    if (Marshal.GetLastWin32Error() != 258) throw new Win32Exception();
+                }
                 if (message == 4 && key.ToUInt64() == 1) break;
+                if (AppName.Length != 0)
+                {
+                    string launcher = Assembly.GetExecutingAssembly().Location;
+                    EasyEdgeApps.Taskbar.Native.ApplyJobIdentity(job, AppId(Path.Combine(Path.GetDirectoryName(launcher), "Sessions")), launcher, AppName, Path.Combine(Path.GetDirectoryName(launcher), "icon.ico"));
+                }
             }
         }
         finally
@@ -606,20 +806,20 @@ public static class EeaFreshSession
     private static extern bool CloseHandle(IntPtr handle);
 }
 '@
-    return $source.Replace('__EEA_EDGE__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($EdgePath))).Replace('__EEA_URL__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cleanWebsite)))
+    return $source.Replace('__EEA_EDGE__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($EdgePath))).Replace('__EEA_URL__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cleanWebsite))).Replace('__EEA_NAME__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cleanName))).Replace('__EEA_FRESH__', $FreshSession.ToString().ToLowerInvariant()) + "`n" + (Get-EeaTaskbarSource)
 }
 
 function Write-EeaSessionLauncher {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Website, [Parameter(Mandatory = $true)][string]$EdgePath)
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Website, [Parameter(Mandatory = $true)][string]$EdgePath, [string]$AppName = '', [bool]$FreshSession = $true)
 
     Assert-EeaSafePath $Path
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     if (-not [IO.File]::Exists($compiler)) { throw 'Fresh sessions require the Windows .NET Framework compiler.' }
     $sourcePath = Join-Path ([IO.Path]::GetDirectoryName($Path)) ('session-' + [Guid]::NewGuid().ToString('N') + '.cs')
     try {
-        [IO.File]::WriteAllText($sourcePath, (Get-EeaSessionLauncherSource -Website $Website -EdgePath $EdgePath), (New-Object Text.UTF8Encoding($false)))
-        $compilerOutput = & $compiler /nologo /target:winexe /platform:x64 /optimize+ ('/out:' + $Path) /reference:System.Windows.Forms.dll $sourcePath 2>&1 | Out-String
+        [IO.File]::WriteAllText($sourcePath, (Get-EeaSessionLauncherSource -Website $Website -EdgePath $EdgePath -AppName $AppName -FreshSession $FreshSession), (New-Object Text.UTF8Encoding($false)))
+        $compilerOutput = & $compiler /nologo /target:winexe /platform:x64 /optimize+ ('/out:' + $Path) /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $sourcePath 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($Path)) { throw 'The fresh-session launcher could not be compiled. No shortcut was changed.' }
     }
     finally { if ([IO.File]::Exists($sourcePath)) { [IO.File]::Delete($sourcePath) } }
@@ -653,21 +853,430 @@ function Get-EeaStateFreshSession {
     return $State.FreshSession
 }
 
+function Get-EeaStateTaskbar {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$State)
+
+    if ($null -eq $State.PSObject.Properties['Taskbar']) { return $false }
+    if ($State.Taskbar -isnot [bool]) { throw 'The saved taskbar choice is invalid.' }
+    return $State.Taskbar
+}
+
+function Test-EeaStateUsesLauncher {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$State)
+
+    return (Get-EeaStateFreshSession $State) -or (Get-EeaStateTaskbar $State)
+}
+
 function Assert-EeaSessionLauncher {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Paths, $State, [switch]$AllowMissing)
 
     Assert-EeaSafePath $Paths.Launcher
-    $freshSession = $null -ne $State -and (Get-EeaStateFreshSession $State)
+    $usesLauncher = $null -ne $State -and (Test-EeaStateUsesLauncher $State)
     if (-not (Test-Path -LiteralPath $Paths.Launcher)) {
-        if ($freshSession -and -not $AllowMissing) { throw 'The fresh-session launcher is missing. Use Check and Repair before opening this website.' }
+        if ($usesLauncher -and -not $AllowMissing) { throw 'The website launcher is missing. Use Check and Repair before opening this website.' }
         return
     }
-    if (-not $freshSession -or -not [IO.File]::Exists($Paths.Launcher) -or
+    if (-not $usesLauncher -or -not [IO.File]::Exists($Paths.Launcher) -or
         (Get-Item -LiteralPath $Paths.Launcher -Force).Length -gt 2MB -or
         (Get-FileHash -LiteralPath $Paths.Launcher -Algorithm SHA256).Hash.ToLowerInvariant() -cne $State.LauncherHash) {
         throw 'The session launcher was changed outside Easy Edge Apps. Nothing was changed; ask your helper to check it.'
     }
+}
+
+function Get-EeaTaskbarSource {
+    return @'
+namespace EasyEdgeApps.Taskbar
+{
+    using System;
+    using System.Runtime.InteropServices;
+    using System.Text.RegularExpressions;
+
+    public static class Native
+    {
+        private static readonly Guid PropertyInterface = new Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99");
+        private static readonly Guid AppModel = new Guid("9f4c2855-9f79-4b39-a8d0-e1d42de1d5f3");
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PropertyKey
+        {
+            public Guid Format;
+            public uint Id;
+            public PropertyKey(uint id) { Format = AppModel; Id = id; }
+        }
+
+        [StructLayout(LayoutKind.Explicit, Size = 24)]
+        private struct PropertyValue
+        {
+            [FieldOffset(0)] public ushort Type;
+            [FieldOffset(8)] public IntPtr Text;
+        }
+
+        [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IPropertyStore
+        {
+            [PreserveSig] int GetCount(out uint count);
+            [PreserveSig] int GetAt(uint index, out PropertyKey key);
+            [PreserveSig] int GetValue(ref PropertyKey key, out PropertyValue value);
+            [PreserveSig] int SetValue(ref PropertyKey key, ref PropertyValue value);
+            [PreserveSig] int Commit();
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        private static extern int SHGetPropertyStoreFromParsingName(string path, IntPtr binding, uint flags, ref Guid requestedInterface, out IPropertyStore store);
+        [DllImport("shell32.dll", PreserveSig = true)]
+        private static extern int SHGetPropertyStoreForWindow(IntPtr window, ref Guid requestedInterface, out IPropertyStore store);
+        [DllImport("ole32.dll", PreserveSig = true)]
+        private static extern int PropVariantClear(ref PropertyValue value);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
+        private static void CheckAppId(string appId)
+        {
+            if (appId == null || !Regex.IsMatch(appId, "\\AEasyEdgeApps\\.Website\\.[a-f0-9]{64}\\z"))
+                throw new ArgumentException("Invalid website taskbar identity.");
+        }
+
+        private static string Read(IPropertyStore store, uint id)
+        {
+            PropertyKey key = new PropertyKey(id);
+            PropertyValue value;
+            Marshal.ThrowExceptionForHR(store.GetValue(ref key, out value));
+            try
+            {
+                if (value.Type == 0) return "";
+                if (value.Type != 31) throw new InvalidOperationException("Unexpected taskbar property type.");
+                return Marshal.PtrToStringUni(value.Text) ?? "";
+            }
+            finally { PropVariantClear(ref value); }
+        }
+
+        private static void Write(IPropertyStore store, uint id, string text)
+        {
+            PropertyKey key = new PropertyKey(id);
+            PropertyValue value = new PropertyValue();
+            value.Type = 31;
+            value.Text = Marshal.StringToCoTaskMemUni(text);
+            try { Marshal.ThrowExceptionForHR(store.SetValue(ref key, ref value)); }
+            finally { PropVariantClear(ref value); }
+        }
+
+        public static string GetShortcutAppId(string path)
+        {
+            Guid requestedInterface = PropertyInterface;
+            IPropertyStore store;
+            Marshal.ThrowExceptionForHR(SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, 0, ref requestedInterface, out store));
+            try { return Read(store, 5); }
+            finally { Marshal.ReleaseComObject(store); }
+        }
+
+        public static void SetShortcutAppId(string path, string appId)
+        {
+            CheckAppId(appId);
+            Guid requestedInterface = PropertyInterface;
+            IPropertyStore store;
+            Marshal.ThrowExceptionForHR(SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, 2, ref requestedInterface, out store));
+            try { Write(store, 5, appId); Marshal.ThrowExceptionForHR(store.Commit()); }
+            finally { Marshal.ReleaseComObject(store); }
+        }
+
+        public static string GetWindowAppId(IntPtr window)
+        {
+            Guid requestedInterface = PropertyInterface;
+            IPropertyStore store;
+            Marshal.ThrowExceptionForHR(SHGetPropertyStoreForWindow(window, ref requestedInterface, out store));
+            try { return Read(store, 5); }
+            finally { Marshal.ReleaseComObject(store); }
+        }
+
+        public static void SetWindowIdentity(IntPtr window, string appId, string launcher, string name, string icon)
+        {
+            CheckAppId(appId);
+            if (!System.IO.Path.IsPathRooted(launcher) || launcher.IndexOf('"') >= 0 || !System.IO.Path.IsPathRooted(icon) || icon.IndexOf('"') >= 0)
+                throw new ArgumentException("Invalid website relaunch path.");
+            Guid requestedInterface = PropertyInterface;
+            IPropertyStore store;
+            Marshal.ThrowExceptionForHR(SHGetPropertyStoreForWindow(window, ref requestedInterface, out store));
+            try
+            {
+                Write(store, 2, "\"" + launcher + "\"");
+                Write(store, 3, icon + ",0");
+                Write(store, 4, name);
+                Write(store, 5, appId);
+            }
+            finally { Marshal.ReleaseComObject(store); }
+        }
+
+        public static void SetProcessIdentity(string appId)
+        {
+            CheckAppId(appId);
+            Marshal.ThrowExceptionForHR(SetCurrentProcessExplicitAppUserModelID(appId));
+        }
+
+        [ComImport, Guid("db32ab74-de52-4fe6-b7b6-95ff9f8395df"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface ITaskbarFactory
+        {
+            [PreserveSig] int GetIids(out uint count, out IntPtr values);
+            [PreserveSig] int GetRuntimeClassName(out IntPtr value);
+            [PreserveSig] int GetTrustLevel(out int value);
+            [PreserveSig] int GetDefault(out ITaskbarManager manager);
+        }
+
+        [ComImport, Guid("87490a19-1ad9-49f4-b2e8-86738dc5ac40"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface ITaskbarManager
+        {
+            [PreserveSig] int GetIids(out uint count, out IntPtr values);
+            [PreserveSig] int GetRuntimeClassName(out IntPtr value);
+            [PreserveSig] int GetTrustLevel(out int value);
+            [PreserveSig] int IsSupported(out byte value);
+            [PreserveSig] int IsPinningAllowed(out byte value);
+            [PreserveSig] int IsCurrentAppPinned(out IAsyncBoolean operation);
+            [PreserveSig] int IsAppListEntryPinned(IntPtr entry, out IAsyncBoolean operation);
+            [PreserveSig] int RequestPinCurrentApp(out IAsyncBoolean operation);
+            [PreserveSig] int RequestPinAppListEntry(IntPtr entry, out IAsyncBoolean operation);
+        }
+
+        [ComImport, Guid("cdb5efb3-5788-509d-9be1-71ccb8a3362a"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IAsyncBoolean
+        {
+            [PreserveSig] int GetIids(out uint count, out IntPtr values);
+            [PreserveSig] int GetRuntimeClassName(out IntPtr value);
+            [PreserveSig] int GetTrustLevel(out int value);
+            [PreserveSig] int SetCompleted(IntPtr handler);
+            [PreserveSig] int GetCompleted(out IntPtr handler);
+            [PreserveSig] int GetResults(out byte value);
+        }
+
+        [ComImport, Guid("00000036-0000-0000-c000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IAsyncInfo
+        {
+            [PreserveSig] int GetIids(out uint count, out IntPtr values);
+            [PreserveSig] int GetRuntimeClassName(out IntPtr value);
+            [PreserveSig] int GetTrustLevel(out int value);
+            [PreserveSig] int GetId(out uint value);
+            [PreserveSig] int GetStatus(out int value);
+            [PreserveSig] int GetErrorCode(out int value);
+            [PreserveSig] int Cancel();
+            [PreserveSig] int Close();
+        }
+
+        [DllImport("combase.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        private static extern int WindowsCreateString(string text, uint length, out IntPtr value);
+        [DllImport("combase.dll", PreserveSig = true)]
+        private static extern int WindowsDeleteString(IntPtr value);
+        [DllImport("combase.dll", PreserveSig = true)]
+        private static extern int RoGetActivationFactory(IntPtr name, ref Guid requestedInterface, [MarshalAs(UnmanagedType.IUnknown)] out object factory);
+
+        public static bool SupportsPinRequests()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\LimitedAccessFeatures\com.microsoft.windows.taskbar.pin"))
+                {
+                    object required = key == null ? null : key.GetValue("4096B239A7295B635C090E647E867B5707DA6AB6CB78340B01FE4E0C8F4953D4", null);
+                    if (required != null && !Object.Equals(required, 0)) return false;
+                }
+                object marker = GetFactory(new Guid("cdfefd63-e879-4134-b9a7-8283f05f9480"));
+                Marshal.ReleaseComObject(marker);
+                return true;
+            }
+            catch (COMException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (System.Security.SecurityException) { return false; }
+            catch (EntryPointNotFoundException) { return false; }
+        }
+
+        private static object GetFactory(Guid requestedInterface)
+        {
+            const string className = "Windows.UI.Shell.TaskbarManager";
+            IntPtr name;
+            Marshal.ThrowExceptionForHR(WindowsCreateString(className, (uint)className.Length, out name));
+            try
+            {
+                object factory;
+                Marshal.ThrowExceptionForHR(RoGetActivationFactory(name, ref requestedInterface, out factory));
+                return factory;
+            }
+            finally { WindowsDeleteString(name); }
+        }
+
+        public sealed class PinOperation : IDisposable
+        {
+            private IAsyncBoolean operation;
+            internal PinOperation(object value) { operation = (IAsyncBoolean)value; }
+            public bool IsCompleted
+            {
+                get
+                {
+                    int status;
+                    Marshal.ThrowExceptionForHR(((IAsyncInfo)operation).GetStatus(out status));
+                    return status != 0;
+                }
+            }
+            public bool Result
+            {
+                get
+                {
+                    byte result;
+                    Marshal.ThrowExceptionForHR(operation.GetResults(out result));
+                    return result != 0;
+                }
+            }
+            public void Dispose()
+            {
+                if (operation == null) return;
+                IAsyncInfo information = (IAsyncInfo)operation;
+                int status;
+                if (information.GetStatus(out status) >= 0 && status == 0) information.Cancel();
+                information.Close();
+                Marshal.ReleaseComObject(operation);
+                operation = null;
+            }
+        }
+
+        public sealed class PinClient : IDisposable
+        {
+            private ITaskbarManager manager;
+            public PinClient()
+            {
+                if (!SupportsPinRequests()) throw new NotSupportedException("Windows taskbar pin requests are unavailable on this device.");
+                object factory = GetFactory(new Guid("db32ab74-de52-4fe6-b7b6-95ff9f8395df"));
+                try { Marshal.ThrowExceptionForHR(((ITaskbarFactory)factory).GetDefault(out manager)); }
+                finally { Marshal.ReleaseComObject(factory); }
+            }
+            public bool IsPinningAllowed
+            {
+                get
+                {
+                    byte supported;
+                    byte allowed;
+                    Marshal.ThrowExceptionForHR(manager.IsSupported(out supported));
+                    Marshal.ThrowExceptionForHR(manager.IsPinningAllowed(out allowed));
+                    return supported != 0 && allowed != 0;
+                }
+            }
+            public PinOperation CheckPinned()
+            {
+                IAsyncBoolean operation;
+                Marshal.ThrowExceptionForHR(manager.IsCurrentAppPinned(out operation));
+                return new PinOperation(operation);
+            }
+            public PinOperation RequestPin()
+            {
+                IAsyncBoolean operation;
+                Marshal.ThrowExceptionForHR(manager.RequestPinCurrentApp(out operation));
+                return new PinOperation(operation);
+            }
+            public void Dispose()
+            {
+                if (manager == null) return;
+                Marshal.ReleaseComObject(manager);
+                manager = null;
+            }
+        }
+
+        private delegate bool WindowCallback(IntPtr window, IntPtr state);
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(WindowCallback callback, IntPtr state);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int capacity);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+        [DllImport("kernel32.dll")]
+        private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool belongs);
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr window, int command);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr LoadImage(IntPtr module, string name, uint type, int width, int height, uint flags);
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr word, IntPtr data, uint flags, uint timeout, out UIntPtr result);
+        private static IntPtr appIcon;
+
+        public static void FocusJobWindow(IntPtr job, string appId)
+        {
+            CheckAppId(appId);
+            EnumWindows(delegate(IntPtr window, IntPtr state)
+            {
+                if (!IsWindowVisible(window)) return true;
+                uint processId;
+                GetWindowThreadProcessId(window, out processId);
+                IntPtr process = OpenProcess(0x1000, false, processId);
+                if (process == IntPtr.Zero) return true;
+                try
+                {
+                    bool belongs;
+                    if (!IsProcessInJob(process, job, out belongs) || !belongs || GetWindowAppId(window) != appId) return true;
+                    if (IsIconic(window)) ShowWindow(window, 9);
+                    SetForegroundWindow(window);
+                    return false;
+                }
+                catch (COMException) { return true; }
+                finally { CloseHandle(process); }
+            }, IntPtr.Zero);
+        }
+
+        public static void ApplyJobIdentity(IntPtr job, string appId, string launcher, string name, string icon)
+        {
+            CheckAppId(appId);
+            if (job == IntPtr.Zero) throw new ArgumentException("A browser job is required.");
+            EnumWindows(delegate(IntPtr window, IntPtr state)
+            {
+                if (!IsWindowVisible(window)) return true;
+                System.Text.StringBuilder className = new System.Text.StringBuilder(128);
+                GetClassName(window, className, className.Capacity);
+                if (className.ToString() != "Chrome_WidgetWin_1") return true;
+                uint processId;
+                GetWindowThreadProcessId(window, out processId);
+                IntPtr process = OpenProcess(0x1000, false, processId);
+                if (process == IntPtr.Zero) return true;
+                try
+                {
+                    bool belongs;
+                    if (IsProcessInJob(process, job, out belongs) && belongs)
+                    {
+                        if (GetWindowAppId(window) != appId) SetWindowIdentity(window, appId, launcher, name, icon);
+                        if (appIcon == IntPtr.Zero) appIcon = LoadImage(IntPtr.Zero, icon, 1, 32, 32, 0x10);
+                        if (appIcon != IntPtr.Zero)
+                        {
+                            UIntPtr currentIcon;
+                            if (SendMessageTimeout(window, 0x7f, new IntPtr(1), IntPtr.Zero, 2, 100, out currentIcon) != IntPtr.Zero && currentIcon.ToUInt64() != unchecked((ulong)appIcon.ToInt64()))
+                            {
+                                UIntPtr ignored;
+                                SendMessageTimeout(window, 0x80, new IntPtr(1), appIcon, 2, 100, out ignored);
+                                SendMessageTimeout(window, 0x80, IntPtr.Zero, appIcon, 2, 100, out ignored);
+                            }
+                        }
+                    }
+                }
+                catch (COMException) { }
+                finally { CloseHandle(process); }
+                return true;
+            }, IntPtr.Zero);
+        }
+    }
+}
+'@
+}
+
+function Initialize-EeaTaskbarTypes {
+    $source = Get-EeaTaskbarSource
+    $sourceHash = (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes($source))).Substring(0, 16)
+    $namespace = 'EasyEdgeApps.Taskbar_' + $sourceHash
+    $typeName = $namespace + '.Native'
+    if ($null -eq ($typeName -as [type])) { Add-Type -TypeDefinition $source.Replace('namespace EasyEdgeApps.Taskbar', ('namespace ' + $namespace)) }
+    return $typeName -as [type]
 }
 
 function Write-EeaShortcut {
@@ -677,7 +1286,8 @@ function Write-EeaShortcut {
         [Parameter(Mandatory = $true)][string]$Target,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Arguments,
         [Parameter(Mandatory = $true)][string]$Description,
-        [Parameter(Mandatory = $true)][string]$Icon
+        [Parameter(Mandatory = $true)][string]$Icon,
+        [string]$AppId = ''
     )
 
     $shell = $null
@@ -692,6 +1302,10 @@ function Write-EeaShortcut {
         $shortcut.IconLocation = $Icon
         $shortcut.WindowStyle = 3
         $shortcut.Save()
+        if ($AppId) {
+            $taskbarType = Initialize-EeaTaskbarTypes
+            $taskbarType::SetShortcutAppId($Path, $AppId)
+        }
     }
     finally {
         if ($null -ne $shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) }
@@ -740,7 +1354,7 @@ function Get-EeaVersion {
     [CmdletBinding()]
     param()
 
-    return [version]'1.3.2'
+    return [version]'1.3.3'
 }
 
 function New-EeaSettings {
@@ -1169,7 +1783,7 @@ function Read-EeaManifest {
         foreach ($propertyName in @('Product', 'SchemaVersion', 'Id', 'Name', 'Url', 'Desktop', 'StartMenu', 'EdgePath', 'IconHash')) {
             if ($null -eq $state.PSObject.Properties[$propertyName]) { throw 'A required setting is missing.' }
         }
-        if ($state.Product -cne 'EasyEdgeApps' -or $state.SchemaVersion -isnot [int] -or $state.SchemaVersion -notin @(1, 2) -or
+        if ($state.Product -cne 'EasyEdgeApps' -or $state.SchemaVersion -isnot [int] -or $state.SchemaVersion -notin @(1, 2, 3) -or
             $state.Id -cne $paths.Id -or (Get-EeaId $state.Name) -cne $paths.Id -or
             $state.Name -cne (ConvertTo-EeaName $state.Name) -or
             $state.Url -cne (ConvertTo-EeaWebsite $state.Url) -or
@@ -1185,8 +1799,13 @@ function Read-EeaManifest {
         if ($null -ne $state.PSObject.Properties['IconKind'] -and $state.IconKind -cnotin @('Generated', 'Custom')) { throw 'Invalid icon kind.' }
         $null = Get-EeaStateProfile $state
         $freshSession = Get-EeaStateFreshSession $state
-        if ($freshSession -ne ($state.SchemaVersion -eq 2)) { throw 'Invalid session schema version.' }
-        if ($freshSession) {
+        $taskbar = Get-EeaStateTaskbar $state
+        if ($state.SchemaVersion -lt 3) {
+            if ($freshSession -ne ($state.SchemaVersion -eq 2) -or $taskbar) { throw 'Invalid session schema version.' }
+        }
+        elseif ($null -eq $state.PSObject.Properties['FreshSession'] -or $null -eq $state.PSObject.Properties['Taskbar'] -or (-not $freshSession -and -not $taskbar)) { throw 'Invalid app-window settings.' }
+        if ($taskbar -and -not $state.StartMenu) { throw 'Taskbar apps require their Start menu entry.' }
+        if ($freshSession -or $taskbar) {
             foreach ($field in @('LauncherHash', 'LauncherSourceHash')) {
                 if ($null -eq $state.PSObject.Properties[$field] -or $state.$field -isnot [string] -or $state.$field -cnotmatch '\A[a-f0-9]{64}\z') { throw 'Invalid session launcher identity.' }
             }
@@ -1232,9 +1851,13 @@ function Test-EeaOwnedShortcut {
     Assert-EeaSafePath $Path
     if (-not [IO.File]::Exists($Path)) { return $false }
     $shortcut = Read-EeaShortcut $Path
-    $freshSession = Get-EeaStateFreshSession $State
-    $expectedArguments = if ($freshSession) { '' } else { Get-EeaArguments $State.Url -EdgeProfile (Get-EeaStateProfile $State) }
-    $expectedTarget = if ($freshSession) { $Paths.Launcher } else { $State.EdgePath }
+    $usesLauncher = Test-EeaStateUsesLauncher $State
+    $expectedArguments = if ($usesLauncher) { '' } else { Get-EeaArguments $State.Url -EdgeProfile (Get-EeaStateProfile $State) }
+    $expectedTarget = if ($usesLauncher) { $Paths.Launcher } else { $State.EdgePath }
+    if ($State.SchemaVersion -eq 3) {
+        $taskbarType = Initialize-EeaTaskbarTypes
+        if ($taskbarType::GetShortcutAppId($Path) -cne ('EasyEdgeApps.Website.' + $Paths.Id)) { return $false }
+    }
     return ($shortcut.Description -ceq ('EasyEdgeApps:' + $State.Id) -and
         $shortcut.Arguments -ceq $expectedArguments -and
         [StringComparer]::OrdinalIgnoreCase.Equals($shortcut.TargetPath, $expectedTarget) -and
@@ -1798,6 +2421,39 @@ function Resolve-EeaWebsite {
     finally { if ($ownsClient) { $Client.Dispose() } }
 }
 
+function Get-EeaWebsiteIconFailureCode {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][Exception]$Failure)
+
+    while ($null -ne $Failure) {
+        if ($Failure.Data.Contains('EeaWebsiteIconFailure') -and $Failure.Data['EeaWebsiteIconFailure'] -in @('Blocked', 'NotFound', 'Unsupported', 'Timeout', 'Transport')) {
+            return [string]$Failure.Data['EeaWebsiteIconFailure']
+        }
+        if ($Failure.Data.Contains('EeaHttpStatusCode')) {
+            if ($Failure.Data['EeaHttpStatusCode'] -in @(401, 403, 429)) { return 'Blocked' }
+            if ($Failure.Data['EeaHttpStatusCode'] -in @(404, 410)) { return 'NotFound' }
+        }
+        if ($Failure -is [OperationCanceledException] -or $Failure -is [TimeoutException]) { return 'Timeout' }
+        if ($Failure -is [Net.Http.HttpRequestException] -or $Failure -is [Net.WebException] -or $Failure -is [IO.IOException]) { return 'Transport' }
+        $Failure = $Failure.InnerException
+    }
+    return 'Failed'
+}
+
+function Get-EeaWebsiteIconFailureMessage {
+    [CmdletBinding()]
+    param([string]$FailureCode)
+
+    switch ($FailureCode) {
+        'Blocked' { return 'Website blocked icon requests. Use Choose icon...; your current icon is unchanged.' }
+        'NotFound' { return 'No website icon was found. Your current icon has not changed.' }
+        'Unsupported' { return 'Website icon format is unsupported. Your current icon has not changed.' }
+        'Timeout' { return 'Icon lookup timed out. Your current icon has not changed.' }
+        'Transport' { return 'Could not reach the website. Your current icon has not changed.' }
+        default { return 'Could not retrieve an icon. Your current icon has not changed.' }
+    }
+}
+
 function Get-EeaWebsiteResponse {
     [CmdletBinding(DefaultParameterSetName = 'Bytes')]
     param(
@@ -1830,6 +2486,11 @@ function Get-EeaWebsiteResponse {
                     if ($address.Scheme -ceq 'https' -and $redirectAddress.Scheme -cne 'https') { throw 'An HTTPS request cannot redirect to HTTP.' }
                     $address = $redirectAddress
                     continue
+                }
+                if (-not $response.IsSuccessStatusCode) {
+                    $httpFailure = New-Object Net.Http.HttpRequestException('Website returned an unsuccessful HTTP response.')
+                    $httpFailure.Data['EeaHttpStatusCode'] = [int]$response.StatusCode
+                    throw $httpFailure
                 }
                 $null = $response.EnsureSuccessStatusCode()
                 if (-not $StreamToFile -and -not $ReadPrefix -and $null -ne $response.Content.Headers.ContentLength -and $response.Content.Headers.ContentLength -gt $MaximumBytes) { throw 'The website response exceeds the icon lookup size limit.' }
@@ -1887,6 +2548,7 @@ function Get-EeaWebsiteIcon {
     if ($ownsClient) { $Client = New-EeaWebsiteClient }
     $lookupCancellation = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($CancellationToken, [Threading.CancellationToken]::None)
     $lookupCancellation.CancelAfter(90000)
+    $failures = New-Object 'Collections.Generic.List[string]'
     try {
         $pageAddress = [uri](Resolve-EeaWebsite -Website $Website -Client $Client -CancellationToken $lookupCancellation.Token)
         $candidates = @(Get-EeaWebsiteIconCandidates -PageUri $pageAddress)
@@ -1901,7 +2563,10 @@ function Get-EeaWebsiteIcon {
                 $candidates = @(Get-EeaWebsiteIconCandidates -PageUri $page.Uri -Html $encoding.GetString($page.Bytes))
             }
         }
-        catch { if ($lookupCancellation.IsCancellationRequested) { throw } }
+        catch {
+            if ($lookupCancellation.IsCancellationRequested) { throw }
+            $failures.Add((Get-EeaWebsiteIconFailureCode $_.Exception))
+        }
         foreach ($candidate in $candidates) {
             $download = $null
             try {
@@ -1910,14 +2575,28 @@ function Get-EeaWebsiteIcon {
                 $lookupCancellation.Token.ThrowIfCancellationRequested()
                 return [pscustomobject]@{ Bytes = $iconData; SourceUrl = $download.Uri.AbsoluteUri; Website = $pageAddress.AbsoluteUri }
             }
-            catch { if ($lookupCancellation.IsCancellationRequested) { throw } }
+            catch {
+                if ($lookupCancellation.IsCancellationRequested) { throw }
+                $failureCode = if ($null -ne $download) { 'Unsupported' } else { Get-EeaWebsiteIconFailureCode $_.Exception }
+                $failures.Add($failureCode)
+            }
             finally { if ($null -ne $download -and $null -ne $download.Stream) { $download.Stream.Dispose() } }
         }
-        throw 'No usable website icon was found. Your current icon has not changed.'
+        $failureCode = 'Failed'
+        foreach ($candidateCode in @('Blocked', 'Unsupported', 'Timeout', 'Transport', 'NotFound')) {
+            if ($failures.Contains($candidateCode)) { $failureCode = $candidateCode; break }
+        }
+        $lookupFailure = New-Object InvalidOperationException((Get-EeaWebsiteIconFailureMessage $failureCode))
+        $lookupFailure.Data['EeaWebsiteIconFailure'] = $failureCode
+        throw $lookupFailure
     }
     catch {
         if ($CancellationToken.IsCancellationRequested) { throw (New-Object OperationCanceledException('Website icon lookup cancelled.')) }
-        if ($lookupCancellation.IsCancellationRequested) { throw 'Website icon lookup timed out. Your current icon has not changed.' }
+        if ($lookupCancellation.IsCancellationRequested) {
+            $timeoutFailure = New-Object TimeoutException((Get-EeaWebsiteIconFailureMessage 'Timeout'))
+            $timeoutFailure.Data['EeaWebsiteIconFailure'] = 'Timeout'
+            throw $timeoutFailure
+        }
         throw
     }
     finally {
@@ -1934,11 +2613,11 @@ function Start-EeaWebsiteIconRequest {
     $cancellation = New-Object Threading.CancellationTokenSource
     $pipeline = [PowerShell]::Create()
     try {
-        $definitions = foreach ($functionName in @('ConvertTo-EeaWebsite', 'Assert-EeaIconData', 'Get-EeaSvgRuntimePayload', 'Initialize-EeaSvgRuntime', 'ConvertTo-EeaWebsiteSvgPng', 'ConvertTo-EeaWebsitePng', 'ConvertTo-EeaWebsiteIcon', 'Get-EeaWebsiteIconCandidates', 'New-EeaWebsiteClient', 'Resolve-EeaWebsite', 'Get-EeaWebsiteResponse', 'Get-EeaWebsiteIcon')) {
+        $definitions = foreach ($functionName in @('ConvertTo-EeaWebsite', 'Assert-EeaIconData', 'Get-EeaSvgRuntimePayload', 'Initialize-EeaSvgRuntime', 'ConvertTo-EeaWebsiteSvgPng', 'ConvertTo-EeaWebsitePng', 'ConvertTo-EeaWebsiteIcon', 'Get-EeaWebsiteIconCandidates', 'New-EeaWebsiteClient', 'Resolve-EeaWebsite', 'Get-EeaWebsiteIconFailureCode', 'Get-EeaWebsiteIconFailureMessage', 'Get-EeaWebsiteResponse', 'Get-EeaWebsiteIcon')) {
             'function ' + $functionName + " {`n" + (Get-Command $functionName -CommandType Function).Definition + "`n}"
         }
         $operation = if ($ResolveOnly) { '[pscustomobject]@{ Website = (Resolve-EeaWebsite -Website $args[0] -CancellationToken $args[1] -Client $args[2]); Bytes = $null; SourceUrl = $null }' }
-            else { 'Get-EeaWebsiteIcon -Website $args[0] -CancellationToken $args[1] -Client $args[2]' }
+            else { 'try { Get-EeaWebsiteIcon -Website $args[0] -CancellationToken $args[1] -Client $args[2] } catch { if ($args[1].IsCancellationRequested) { throw }; [pscustomobject]@{ Website = $args[0]; Bytes = $null; SourceUrl = $null; FailureCode = (Get-EeaWebsiteIconFailureCode $_.Exception) } }' }
         $bootstrap = '$ErrorActionPreference = ''Stop''' + "`n" + ($definitions -join "`n") + "`n" + $operation
         [void]$pipeline.AddScript($bootstrap).AddArgument($Website.Trim()).AddArgument($cancellation.Token).AddArgument($Client)
         $pending = $pipeline.BeginInvoke()
@@ -2114,10 +2793,10 @@ function Invoke-EeaTransaction {
         if (-not $keepRecovery -and [IO.Directory]::Exists($pendingPath)) {
             Assert-EeaSafePath $pendingPath
             try { [IO.Directory]::Delete($pendingPath, $true) }
-            catch [IO.IOException] {
+            catch [IO.IOException], [UnauthorizedAccessException] {
                 if ([IO.Directory]::Exists($pendingPath)) {
                     [IO.File]::WriteAllText((Join-Path $pendingPath 'complete.txt'), 'EasyEdgeApps:complete:1', [Text.Encoding]::ASCII)
-                    Write-Warning 'Windows is still using temporary setup files. The completed change is safe; cleanup will be retried on the next change.'
+                    Write-Warning 'Temporary setup files could not be removed. The completed change is safe; cleanup will be retried on the next change.'
                 }
             }
         }
@@ -2156,6 +2835,7 @@ function Install-EeaApp {
         [AllowEmptyString()][string]$Notes,
         [AllowEmptyString()][string]$EdgeProfile,
         [bool]$FreshSession = $false,
+        [bool]$Taskbar = $false,
         [bool]$Desktop = $true,
         [bool]$StartMenu = $true,
         $Context = (Get-EeaContext)
@@ -2166,6 +2846,7 @@ function Install-EeaApp {
     $notesProvided = $PSBoundParameters.ContainsKey('Notes')
     $profileProvided = $PSBoundParameters.ContainsKey('EdgeProfile')
     $freshSessionProvided = $PSBoundParameters.ContainsKey('FreshSession')
+    $taskbarProvided = $PSBoundParameters.ContainsKey('Taskbar')
     if ($notesProvided) { $Notes = ConvertTo-EeaNotes $Notes }
     if ($profileProvided) { $EdgeProfile = ConvertTo-EeaProfileDirectory $EdgeProfile }
     if (@(@([bool]$CustomIcon, ($null -ne $IconData), [bool]$GenerateIcon) | Where-Object { $_ }).Count -gt 1) { throw 'Choose one icon source.' }
@@ -2183,6 +2864,8 @@ function Install-EeaApp {
         $savedNotes = if ($notesProvided) { $Notes } elseif ($null -ne $previousState -and $null -ne $previousState.PSObject.Properties['Notes']) { $previousState.Notes } else { '' }
         $savedProfile = if ($profileProvided) { $EdgeProfile } elseif ($null -ne $previousState) { Get-EeaStateProfile $previousState } else { (Get-EeaSettings -Context $Context).DefaultEdgeProfile }
         $savedFreshSession = if ($freshSessionProvided) { $FreshSession } elseif ($null -ne $previousState) { Get-EeaStateFreshSession $previousState } else { $false }
+        $savedTaskbar = if ($taskbarProvided) { $Taskbar } elseif ($null -ne $previousState) { Get-EeaStateTaskbar $previousState } else { $false }
+        if ($savedTaskbar -and -not $StartMenu) { throw 'Taskbar apps require a Start menu shortcut for Windows pinning.' }
         Invoke-EeaTransaction -Context $Context -Prepare {
             param($StagePath)
             $stagedIcon = Join-Path $StagePath 'icon.ico'
@@ -2209,18 +2892,21 @@ function Install-EeaApp {
             if ($savedProfile) { $newState | Add-Member -NotePropertyName EdgeProfile -NotePropertyValue $savedProfile }
             $shortcutTarget = $edgePath
             $shortcutArguments = Get-EeaArguments $cleanWebsite -EdgeProfile $savedProfile
-            if ($savedFreshSession) {
+            $shortcutAppId = ''
+            if ($savedFreshSession -or $savedTaskbar) {
                 $stagedLauncher = Join-Path $StagePath 'fresh-session.exe'
-                Write-EeaSessionLauncher -Path $stagedLauncher -Website $cleanWebsite -EdgePath $edgePath
-                $newState.SchemaVersion = 2
-                $newState | Add-Member -NotePropertyName FreshSession -NotePropertyValue $true
+                Write-EeaSessionLauncher -Path $stagedLauncher -Website $cleanWebsite -EdgePath $edgePath -AppName $cleanName -FreshSession $savedFreshSession
+                $newState.SchemaVersion = 3
+                $newState | Add-Member -NotePropertyName FreshSession -NotePropertyValue $savedFreshSession
+                $newState | Add-Member -NotePropertyName Taskbar -NotePropertyValue $savedTaskbar
                 $newState | Add-Member -NotePropertyName LauncherHash -NotePropertyValue (Get-FileHash -LiteralPath $stagedLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
-                $newState | Add-Member -NotePropertyName LauncherSourceHash -NotePropertyValue (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes((Get-EeaSessionLauncherSource -Website $cleanWebsite -EdgePath $edgePath))))
+                $newState | Add-Member -NotePropertyName LauncherSourceHash -NotePropertyValue (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes((Get-EeaSessionLauncherSource -Website $cleanWebsite -EdgePath $edgePath -AppName $cleanName -FreshSession $savedFreshSession))))
                 $shortcutTarget = $paths.Launcher
                 $shortcutArguments = ''
+                $shortcutAppId = 'EasyEdgeApps.Website.' + $paths.Id
                 [pscustomobject]@{ Path = $paths.Launcher; Source = $stagedLauncher }
             }
-            elseif ($null -ne $previousState -and (Get-EeaStateFreshSession $previousState)) {
+            elseif ($null -ne $previousState -and (Test-EeaStateUsesLauncher $previousState)) {
                 [pscustomobject]@{ Path = $paths.Launcher; Source = $null }
             }
             [pscustomobject]@{ Path = $paths.Icon; Source = $stagedIcon }
@@ -2228,7 +2914,7 @@ function Install-EeaApp {
                 $selected = if ($slot -eq 'Desktop') { $Desktop } else { $StartMenu }
                 if ($selected) {
                     $stagedShortcut = Join-Path $StagePath ($slot + '.lnk')
-                    Write-EeaShortcut -Path $stagedShortcut -Target $shortcutTarget -Arguments $shortcutArguments -Description ('EasyEdgeApps:' + $paths.Id) -Icon ($paths.Icon + ',0')
+                    Write-EeaShortcut -Path $stagedShortcut -Target $shortcutTarget -Arguments $shortcutArguments -Description ('EasyEdgeApps:' + $paths.Id) -Icon ($paths.Icon + ',0') -AppId $shortcutAppId
                     [pscustomobject]@{ Path = $paths.$slot; Source = $stagedShortcut }
                 }
                 elseif ($null -ne $previousState -and $previousState.$slot) {
@@ -2261,7 +2947,7 @@ function Remove-EeaApp {
                 if ($state.$slot) { [pscustomobject]@{ Path = $paths.$slot; Source = $null } }
             }
             [pscustomobject]@{ Path = $paths.Icon; Source = $null }
-            if (Get-EeaStateFreshSession $state) { [pscustomobject]@{ Path = $paths.Launcher; Source = $null } }
+            if (Test-EeaStateUsesLauncher $state) { [pscustomobject]@{ Path = $paths.Launcher; Source = $null } }
             [pscustomobject]@{ Path = $paths.Manifest; Source = $null }
         }
         foreach ($directory in @($paths.Directory, $paths.AppsRoot, $Context.Programs, $Context.Root)) {
@@ -2281,7 +2967,7 @@ function Show-EeaTaskbarShortcut {
     $state = Read-EeaManifest $Context $AppName
     if ($null -eq $state) { throw 'Save this website before pinning it to the taskbar.' }
     $paths = Get-EeaPaths $Context $state.Name
-    if (Get-EeaStateFreshSession $state) { Assert-EeaSessionLauncher -Paths $paths -State $state }
+    if (Test-EeaStateUsesLauncher $state) { Assert-EeaSessionLauncher -Paths $paths -State $state }
     $shortcutPath = $null
     foreach ($slot in @('StartMenu', 'Desktop')) {
         if (-not $state.$slot) { continue }
@@ -2300,6 +2986,23 @@ function Show-EeaTaskbarShortcut {
     }
 }
 
+function Request-EeaTaskbarPin {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)][string]$AppName, $Context = (Get-EeaContext))
+
+    Assert-EeaReady $Context
+    $state = Read-EeaManifest $Context $AppName
+    if ($null -eq $state -or -not (Get-EeaStateTaskbar $state) -or $state.SchemaVersion -ne 3) { throw 'Save this website with Taskbar selected before requesting a pin.' }
+    $paths = Get-EeaPaths $Context $state.Name
+    Assert-EeaSessionLauncher -Paths $paths -State $state
+    if (-not $state.StartMenu -or -not (Test-EeaOwnedShortcut $paths.StartMenu $state $paths)) { throw 'The Start menu shortcut is missing or changed. Use Check and Repair before pinning.' }
+    $taskbarType = Initialize-EeaTaskbarTypes
+    if (-not $taskbarType::SupportsPinRequests()) { throw 'Windows taskbar pin requests are unavailable. Update Windows or pin the saved shortcut using Windows. No pin was requested.' }
+    if ($PSCmdlet.ShouldProcess($state.Name, 'Ask Windows to pin this website to the taskbar; Windows requires user approval')) {
+        return Start-Process -FilePath $paths.Launcher -ArgumentList '--pin' -PassThru -ErrorAction Stop
+    }
+}
+
 function Start-EeaApp {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([Parameter(Mandatory = $true)][string]$AppName, $Context = (Get-EeaContext))
@@ -2308,14 +3011,14 @@ function Start-EeaApp {
     $state = Read-EeaManifest $Context $AppName
     if ($null -eq $state) { throw 'This website has not been added yet.' }
     $edgePath = Find-EeaEdge
-    $freshSession = Get-EeaStateFreshSession $state
-    if ($freshSession) {
+    $usesLauncher = Test-EeaStateUsesLauncher $state
+    if ($usesLauncher) {
         $paths = Get-EeaPaths $Context $state.Name
         Assert-EeaSessionLauncher -Paths $paths -State $state
-        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($edgePath, $state.EdgePath)) { throw 'Edge has moved. Use Check and Repair before opening this fresh-session website.' }
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($edgePath, $state.EdgePath)) { throw 'Edge has moved. Use Check and Repair before opening this website app.' }
     }
     if ($PSCmdlet.ShouldProcess($state.Name, 'Open website in Microsoft Edge')) {
-        if ($freshSession) { Start-Process -FilePath $paths.Launcher -ErrorAction Stop }
+        if ($usesLauncher) { Start-Process -FilePath $paths.Launcher -ErrorAction Stop }
         else { Start-Process -FilePath $edgePath -ArgumentList (Get-EeaArguments $state.Url -EdgeProfile (Get-EeaStateProfile $state)) -ErrorAction Stop }
     }
 }
@@ -2441,18 +3144,29 @@ function New-EeaKit {
     return ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = $schemaVersion; Name = $KitName; Notes = $Notes; Apps = $portableApps })
 }
 
+function Get-EeaBrowsingMode {
+    [CmdletBinding()]
+    param($State)
+
+    if ($null -eq $State) { return 'Unknown' }
+    if (Get-EeaStateFreshSession $State) { return 'Fresh Guest session (temporary)' }
+    if (Get-EeaStateTaskbar $State) { return 'Dedicated app profile (persistent)' }
+    return 'Normal Edge profile'
+}
+
 function Get-EeaChecks {
     [CmdletBinding()]
     param([string[]]$AppNames, $Context = (Get-EeaContext))
 
+    $missingSettingsIssue = 'App settings are missing. This folder may contain retained data; removal intent is unknown. No repair or deletion was performed.'
     try { Assert-EeaReady $Context }
-    catch { return [pscustomobject]@{ Name = 'Setup recovery'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($_.Exception.Message); State = $null } }
+    catch { return [pscustomobject]@{ Name = 'Setup recovery'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($_.Exception.Message); State = $null; BrowsingMode = 'Unknown' } }
     $edgePath = $null
     $edgeIssue = ''
     try { $edgePath = Find-EeaEdge } catch { $edgeIssue = $_.Exception.Message }
     $entries = New-Object 'Collections.Generic.List[object]'
     if ($AppNames) {
-        foreach ($appName in $AppNames) { $entries.Add([pscustomobject]@{ Name = (ConvertTo-EeaName $appName); Id = (Get-EeaId $appName); Invalid = $false }) }
+        foreach ($appName in $AppNames) { $entries.Add([pscustomobject]@{ Name = (ConvertTo-EeaName $appName); Id = (Get-EeaId $appName); Invalid = $false; Missing = $false }) }
     }
     else {
         $appsRoot = Join-Path $Context.Root 'Apps'
@@ -2461,11 +3175,12 @@ function Get-EeaChecks {
             if ([IO.Directory]::Exists($appsRoot)) {
                 foreach ($directory in @(Get-ChildItem -LiteralPath $appsRoot -Directory -Force -ErrorAction Stop | Sort-Object Name)) {
                     if ($directory.Name -cnotmatch '^[a-f0-9]{64}$') { continue }
-                    $candidate = [pscustomobject]@{ Name = ('Saved app ' + $directory.Name.Substring(0, 8)); Id = $directory.Name; Invalid = $true }
+                    $candidate = [pscustomobject]@{ Name = ('App folder ' + $directory.Name.Substring(0, 8)); Id = $directory.Name; Invalid = $true; Missing = $false }
                     try {
                         $manifestPath = Join-Path $directory.FullName 'app.json'
                         Assert-EeaSafePath $manifestPath
-                        if (-not [IO.File]::Exists($manifestPath) -or (Get-Item -LiteralPath $manifestPath -Force).Length -gt 32768) { throw 'Invalid settings.' }
+                        $candidate.Missing = -not (Test-Path -LiteralPath $manifestPath)
+                        if ($candidate.Missing -or -not [IO.File]::Exists($manifestPath) -or (Get-Item -LiteralPath $manifestPath -Force).Length -gt 32768) { throw 'Invalid settings.' }
                         $summary = ConvertFrom-EeaJson ([IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8))
                         if ($null -eq $summary.PSObject.Properties['Name'] -or $summary.Name -isnot [string] -or (Get-EeaId $summary.Name) -cne $directory.Name) { throw 'Invalid identity.' }
                         $candidate.Name = $summary.Name
@@ -2476,19 +3191,23 @@ function Get-EeaChecks {
                 }
             }
         }
-        catch { return [pscustomobject]@{ Name = 'Saved apps'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @('The saved apps folder cannot be safely read.'); State = $null } }
+        catch { return [pscustomobject]@{ Name = 'Saved apps'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @('The saved apps folder cannot be safely read.'); State = $null; BrowsingMode = 'Unknown' } }
     }
     if ($entries.Count -eq 0 -and $edgeIssue) {
-        return [pscustomobject]@{ Name = 'Microsoft Edge'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($edgeIssue); State = $null }
+        return [pscustomobject]@{ Name = 'Microsoft Edge'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($edgeIssue); State = $null; BrowsingMode = 'Unknown' }
     }
     foreach ($entry in $entries) {
         $issues = New-Object 'Collections.Generic.List[string]'
         $state = $null
         $status = 'Healthy'
         try {
+            if ($entry.Missing) { throw $missingSettingsIssue }
             if ($entry.Invalid) { throw 'Saved settings are missing or damaged. Ask your helper to restore a trusted copy.' }
             $state = Read-EeaManifest $Context $entry.Name
-            if ($null -eq $state) { throw 'This website has no valid saved settings.' }
+            if ($null -eq $state) {
+                if ([IO.Directory]::Exists((Get-EeaPaths $Context $entry.Name).Directory)) { throw $missingSettingsIssue }
+                throw 'This website has no valid saved settings.'
+            }
             $paths = Get-EeaPaths $Context $state.Name
             Assert-EeaOwnership -Paths $paths -State $state -Desktop $state.Desktop -StartMenu $state.StartMenu
             foreach ($slot in @('Desktop', 'StartMenu')) {
@@ -2497,9 +3216,9 @@ function Get-EeaChecks {
             if (-not [IO.File]::Exists($paths.Icon)) { $issues.Add('Recreate missing icon as an automatic letter icon. Import a trusted kit to restore a custom icon.') }
             else { $null = Read-EeaCustomIcon $paths.Icon }
             if ($edgePath -and -not [StringComparer]::OrdinalIgnoreCase.Equals($state.EdgePath, $edgePath)) { $issues.Add('Update owned shortcuts to the current Edge executable.') }
-            if (Get-EeaStateFreshSession $state) {
-                if (-not [IO.File]::Exists($paths.Launcher)) { $issues.Add('Recreate the missing fresh-session launcher.') }
-                elseif ($edgePath -and $state.LauncherSourceHash -cne (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes((Get-EeaSessionLauncherSource -Website $state.Url -EdgePath $edgePath))))) { $issues.Add('Update the owned fresh-session launcher.') }
+            if (Test-EeaStateUsesLauncher $state) {
+                if (-not [IO.File]::Exists($paths.Launcher)) { $issues.Add('Recreate the missing website launcher.') }
+                elseif ($edgePath -and $state.LauncherSourceHash -cne (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes((Get-EeaSessionLauncherSource -Website $state.Url -EdgePath $edgePath -AppName $state.Name -FreshSession (Get-EeaStateFreshSession $state)))))) { $issues.Add('Update the owned website launcher and taskbar identity.') }
             }
             if ($issues.Count -gt 0) { $status = 'Repairable' }
         }
@@ -2510,7 +3229,7 @@ function Get-EeaChecks {
             try { $snapshot = Get-EeaAppSnapshot -Paths $paths -EdgePath $edgePath }
             catch { $status = 'Conflict'; $issues.Add('The app files could not be safely checked.') }
         }
-        [pscustomobject]@{ Name = $entry.Name; Id = $entry.Id; Status = $status; CanRepair = ($status -eq 'Repairable'); Issues = $issues.ToArray(); State = $state; Snapshot = $snapshot }
+        [pscustomobject]@{ Name = $entry.Name; Id = $entry.Id; Status = $status; CanRepair = ($status -eq 'Repairable'); Issues = $issues.ToArray(); State = $state; Snapshot = $snapshot; BrowsingMode = (Get-EeaBrowsingMode $state) }
     }
 }
 
@@ -2542,15 +3261,19 @@ function Get-EeaKitPreview {
         $action = 'Add'
         $detail = 'Create the selected shortcuts.'
         $currentUrl = ''
+        $currentBrowsingMode = 'Not saved'
+        $browsingMode = 'Unknown'
         $domainChanged = $false
         $snapshot = ''
         try {
             if ($setupIssue) { throw $setupIssue }
             $paths = Get-EeaPaths $Context $app.Name
             $state = Read-EeaManifest $Context $app.Name
+            if ($null -ne $state) { $currentBrowsingMode = Get-EeaBrowsingMode $state }
             Assert-EeaOwnership -Paths $paths -State $state -Desktop $app.Desktop -StartMenu $app.StartMenu
             if ($null -ne $state) {
                 if ($NewOnly) { throw 'A website with this name is now saved. Refresh Favorites before adding it.' }
+                if ((Get-EeaStateTaskbar $state) -and -not $app.StartMenu) { throw 'This taskbar app requires its Start menu entry. Clear Taskbar in setup before importing a kit without that entry.' }
                 $currentUrl = $state.Url
                 $domainChanged = -not [StringComparer]::OrdinalIgnoreCase.Equals(([Uri]$state.Url).IdnHost, ([Uri]$app.Url).IdnHost)
                 $check = Get-EeaChecks -AppNames @($state.Name) -Context $Context
@@ -2566,14 +3289,19 @@ function Get-EeaKitPreview {
                 if ($state.Url -ceq $app.Url -and $state.Desktop -eq $app.Desktop -and $state.StartMenu -eq $app.StartMenu -and
                     $oldNotes -ceq $app.Notes -and $sameIcon -and $sameSession -and $check.Status -eq 'Healthy') { $action = 'Unchanged'; $detail = 'Already matches this kit.' }
                 if (-not $sameSession) {
-                    $detail += if (Get-EeaStateFreshSession $app) { ' FRESH SESSIONS ENABLED. Sign in on every launch.' } else { ' FRESH SESSIONS DISABLED. Browser data will persist in the normal profile.' }
+                    $detail += if (Get-EeaStateFreshSession $app) { ' FRESH SESSIONS ENABLED. Sign in on every launch.' }
+                        elseif (Get-EeaStateTaskbar $state) { ' FRESH SESSIONS DISABLED. Browser data will persist in this website''s separate app profile.' }
+                        else { ' FRESH SESSIONS DISABLED. Browser data will persist in the normal profile.' }
                 }
             }
             elseif (Get-EeaStateFreshSession $app) { $detail = 'Create shortcuts with fresh sessions. Sign in on every launch.' }
             $snapshot = Get-EeaAppSnapshot -Paths $paths -EdgePath $edgePath
+            $nextFresh = if ($validated.SchemaVersion -eq 1 -and $null -ne $state) { Get-EeaStateFreshSession $state } else { Get-EeaStateFreshSession $app }
+            $nextTaskbar = $null -ne $state -and (Get-EeaStateTaskbar $state)
+            $browsingMode = Get-EeaBrowsingMode ([pscustomobject]@{ FreshSession = $nextFresh; Taskbar = $nextTaskbar })
         }
-        catch { $action = 'Conflict'; $detail = $_.Exception.Message }
-        [pscustomobject]@{ Name = $app.Name; Action = $action; CurrentUrl = $currentUrl; Url = $app.Url; DomainChanged = $domainChanged; Detail = $detail; Snapshot = $snapshot; App = $app }
+        catch { $action = 'Conflict'; $detail = $_.Exception.Message; $browsingMode = 'Unknown' }
+        [pscustomobject]@{ Name = $app.Name; Action = $action; CurrentUrl = $currentUrl; Url = $app.Url; DomainChanged = $domainChanged; Detail = $detail; Snapshot = $snapshot; App = $app; CurrentBrowsingMode = $currentBrowsingMode; BrowsingMode = $browsingMode }
     }
 }
 
@@ -3258,6 +3986,7 @@ namespace EasyEdgeApps
         private bool animationsAllowed;
         private bool highContrast;
         private double lastTick, sceneTime;
+        private double paintMilliseconds;
         private PointF smoothPointer = new PointF(0.5f, 0.5f);
         private float pointerInfluence;
 
@@ -3380,7 +4109,9 @@ namespace EasyEdgeApps
                 RenderedFrameCount++;
                 renderClock.Stop();
                 int minimumInterval = SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline ? 50 : 33;
-                animationTimer.Interval = Math.Max(minimumInterval, Math.Min(100, (int)(renderClock.Elapsed.TotalMilliseconds * 3)));
+                double frameMilliseconds = renderClock.Elapsed.TotalMilliseconds + paintMilliseconds;
+                paintMilliseconds = 0;
+                animationTimer.Interval = Math.Max(minimumInterval, (int)Math.Min(100, frameMilliseconds * 3));
             }
             catch (Exception failure)
             {
@@ -3405,19 +4136,38 @@ namespace EasyEdgeApps
 
         public bool PaintScene(Control surface, Graphics graphics)
         {
+            return PaintScene(surface, graphics, surface.ClientRectangle);
+        }
+
+        public bool PaintScene(Control surface, Graphics graphics, Rectangle clip)
+        {
             if (!SceneEnabled || frame == null || disposing) return false;
             Point origin = surface == this ? Point.Empty : PointToClient(surface.PointToScreen(Point.Empty));
             float scaleHorizontal = frame.Width / (float)Math.Max(1, ClientSize.Width);
             float scaleVertical = frame.Height / (float)Math.Max(1, ClientSize.Height);
-            Rectangle destination = surface.ClientRectangle;
-            RectangleF source = new RectangleF(origin.X * scaleHorizontal, origin.Y * scaleVertical, destination.Width * scaleHorizontal, destination.Height * scaleVertical);
-            graphics.DrawImage(frame, destination, source, GraphicsUnit.Pixel);
+            Rectangle destination = Rectangle.Intersect(surface.ClientRectangle, clip);
+            if (destination.IsEmpty) return true;
+            RectangleF source = new RectangleF((origin.X + destination.X) * scaleHorizontal, (origin.Y + destination.Y) * scaleVertical, destination.Width * scaleHorizontal, destination.Height * scaleVertical);
+            Stopwatch paintClock = Stopwatch.StartNew();
+            GraphicsState state = graphics.Save();
+            try
+            {
+                graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+                graphics.PixelOffsetMode = PixelOffsetMode.Half;
+                graphics.CompositingMode = CompositingMode.SourceCopy;
+                graphics.DrawImage(frame, destination, source, GraphicsUnit.Pixel);
+            }
+            finally
+            {
+                graphics.Restore(state);
+                paintMilliseconds += paintClock.Elapsed.TotalMilliseconds;
+            }
             return true;
         }
 
         protected override void OnPaintBackground(PaintEventArgs arguments)
         {
-            if (!PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+            if (!PaintScene(this, arguments.Graphics, arguments.ClipRectangle)) base.OnPaintBackground(arguments);
         }
 
         protected override void OnHandleCreated(EventArgs arguments)
@@ -3491,7 +4241,7 @@ namespace EasyEdgeApps
         protected override void OnPaintBackground(PaintEventArgs arguments)
         {
             StarfieldForm form = FindForm() as StarfieldForm;
-            if (form == null || !form.PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+            if (form == null || !form.PaintScene(this, arguments.Graphics, arguments.ClipRectangle)) base.OnPaintBackground(arguments);
         }
     }
 
@@ -3501,7 +4251,7 @@ namespace EasyEdgeApps
         protected override void OnPaintBackground(PaintEventArgs arguments)
         {
             StarfieldForm form = FindForm() as StarfieldForm;
-            if (form == null || !form.PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+            if (form == null || !form.PaintScene(this, arguments.Graphics, arguments.ClipRectangle)) base.OnPaintBackground(arguments);
         }
     }
 
@@ -3522,7 +4272,7 @@ namespace EasyEdgeApps
         protected override void OnPaintBackground(PaintEventArgs arguments)
         {
             StarfieldForm form = FindForm() as StarfieldForm;
-            if (form == null || !form.PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+            if (form == null || !form.PaintScene(this, arguments.Graphics, arguments.ClipRectangle)) base.OnPaintBackground(arguments);
         }
     }
 
@@ -3929,12 +4679,12 @@ function Start-EeaEditorWebsiteLookup {
     param([Parameter(Mandatory = $true)]$Form, [switch]$ResolveOnly, [switch]$SaveAfterResolution)
 
     $ui = $Form.Tag
-    if ($null -ne $ui.IconRequest) { return }
+    if ($null -ne $ui.IconRequest -or $null -ne $ui.PinProcess) { return }
     $pendingSave = if ($SaveAfterResolution) {
         [pscustomobject]@{
             Name = $ui.NameInput.Text; Notes = $ui.NotesInput.Text
             Desktop = $ui.DesktopCheck.Checked; StartMenu = $ui.StartMenuCheck.Checked; CustomIcon = $ui.CustomIcon
-            FreshSession = $ui.FreshSessionCheck.Checked
+            FreshSession = $ui.FreshSessionCheck.Checked; Taskbar = $ui.TaskbarCheck.Checked
         }
     } else { $null }
     $ui.IconRequest = Start-EeaWebsiteIconRequest -Website $ui.UrlInput.Text -ResolveOnly:$ResolveOnly
@@ -3955,11 +4705,16 @@ function Complete-EeaWebsiteIconLookup {
     $request = $ui.IconRequest
     if ($null -eq $request -or -not $request.AsyncResult.IsCompleted) { return }
     $resumeSave = $false
+    $iconFailureCode = 'Failed'
     try {
         $result = @($request.PowerShell.EndInvoke($request.AsyncResult))
         if (-not $request.Discard -and -not $request.Cancellation.IsCancellationRequested -and
             (ConvertTo-EeaWebsite $ui.UrlInput.Text -AllowMissingScheme) -ceq $request.Website) {
             if ($result.Count -ne 1) { throw 'The website lookup did not return a result.' }
+            if (-not $request.ResolveOnly -and $null -ne $result[0].PSObject.Properties['FailureCode'] -and $result[0].FailureCode) {
+                $iconFailureCode = [string]$result[0].FailureCode
+                throw 'Website icon lookup failed.'
+            }
             $resolvedWebsite = ConvertTo-EeaWebsite $result[0].Website
             if ($ui.UrlInput.Text.Trim() -match '^https://' -and $resolvedWebsite -notmatch '^https://') { throw 'An explicit HTTPS address cannot be downgraded.' }
             $ui.UpdatingWebsite = $true
@@ -3972,7 +4727,7 @@ function Complete-EeaWebsiteIconLookup {
             if ($request.ResolveOnly -and $null -ne $pendingSave) {
                 $resumeSave = $ui.NameInput.Text -ceq $pendingSave.Name -and $ui.NotesInput.Text -ceq $pendingSave.Notes -and
                     $ui.DesktopCheck.Checked -eq $pendingSave.Desktop -and $ui.StartMenuCheck.Checked -eq $pendingSave.StartMenu -and $ui.CustomIcon -ceq $pendingSave.CustomIcon -and
-                    $ui.FreshSessionCheck.Checked -eq $pendingSave.FreshSession
+                    $ui.FreshSessionCheck.Checked -eq $pendingSave.FreshSession -and $ui.TaskbarCheck.Checked -eq $pendingSave.Taskbar
                 if (-not $resumeSave) { $ui.StatusLabel.Text += ' Unsaved changes remain in the editor.' }
             }
         }
@@ -3981,7 +4736,7 @@ function Complete-EeaWebsiteIconLookup {
     catch {
         $ui.StatusLabel.Text = if ($request.Discard -or $request.Cancellation.IsCancellationRequested) { 'Website lookup cancelled.' }
             elseif ($request.ResolveOnly) { 'Could not resolve the website address. ' + $_.Exception.GetBaseException().Message }
-            else { 'Could not retrieve an icon. Your current icon has not changed.' }
+            else { Get-EeaWebsiteIconFailureMessage $iconFailureCode }
     }
     finally {
         $request.PowerShell.Dispose()
@@ -3992,10 +4747,62 @@ function Complete-EeaWebsiteIconLookup {
         $ui.ActivitySpinner.IsBusy = $false
         $ui.GetIconButton.Enabled = $true
         $ui.CancelIconButton.Enabled = $false
-        $ui.SaveButton.Enabled = $true
+        $ui.SaveButton.Enabled = $null -eq $ui.PinProcess
     }
     if ($ui.CloseAfterIconLookup) { $Form.Close() }
     elseif ($resumeSave) { $ui.SaveButton.PerformClick() }
+}
+
+function Update-EeaPinControls {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $ui = $Form.Tag
+    $busy = $null -ne $ui.PinProcess
+    $ui.SaveButton.Enabled = -not $busy -and $null -eq $ui.IconRequest
+    foreach ($control in @($ui.AppList, $ui.NewButton, $ui.ImportButton, $ui.FavoritesButton, $ui.CheckButton)) { $control.Enabled = -not $busy }
+    $ui.OpenButton.Enabled = -not $busy -and $ui.AppList.SelectedIndex -ge 0
+    $ui.RemoveButton.Enabled = -not $busy -and $ui.AppList.SelectedIndex -ge 0
+    $ui.GetIconButton.Enabled = -not $busy -and $null -eq $ui.IconRequest
+}
+
+function Complete-EeaTaskbarPin {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $ui = $Form.Tag
+    if ($null -eq $ui.PinProcess) { return }
+    $completed = $false
+    try {
+        $ui.PinProcess.Refresh()
+        if ($ui.CloseAfterPinRequest -and -not $ui.PinProcess.HasExited) {
+            [void]$ui.PinProcess.CloseMainWindow()
+            if ([DateTime]::UtcNow -ge $ui.PinCloseDeadline -and -not $ui.PinProcess.HasExited) { $ui.PinProcess.Kill() }
+        }
+        if (-not $ui.PinProcess.HasExited) { return }
+        $completed = $true
+        $ui.StatusLabel.Text = switch ($ui.PinProcess.ExitCode) {
+            0 { 'Pinned to taskbar: ' + $ui.PinAppName }
+            3 { 'Saved. Taskbar pin was not approved.' }
+            4 { 'Saved. Windows could not offer a taskbar pin.' }
+            default { 'Saved. Taskbar pin request failed.' }
+        }
+    }
+    catch {
+        $completed = $true
+        try { if (-not $ui.PinProcess.HasExited) { $ui.PinProcess.Kill() } }
+        catch { }
+        $ui.StatusLabel.Text = 'Saved. Taskbar pin result could not be confirmed.'
+    }
+    finally {
+        if ($completed) {
+            $ui.PinProcess.Dispose()
+            $ui.PinProcess = $null
+            $ui.PinTimer.Stop()
+            Update-EeaPinControls $Form
+            if ($ui.CloseAfterPinRequest) { $Form.Close() }
+        }
+    }
 }
 
 function Reset-EeaEditor {
@@ -4009,6 +4816,8 @@ function Reset-EeaEditor {
     $ui.NameInput.Clear()
     $ui.UrlInput.Clear()
     $ui.NotesInput.Clear()
+    $ui.TaskbarCheck.Checked = $false
+    $ui.TaskbarCheck.Enabled = $ui.TaskbarSupported
     $ui.DesktopCheck.Checked = $ui.Settings.DefaultDesktop
     $ui.StartMenuCheck.Checked = $ui.Settings.DefaultStartMenu
     $ui.FreshSessionCheck.Checked = $false
@@ -4021,7 +4830,7 @@ function Reset-EeaEditor {
     Set-EeaControlIcon -Control $ui.SaveButton -Icon Add
     $ui.OpenButton.Enabled = $false
     $ui.RemoveButton.Enabled = $false
-    $ui.PinButton.Enabled = $false
+    Update-EeaPinControls $Form
     [void]$ui.NameInput.Focus()
 }
 
@@ -4154,11 +4963,43 @@ function Open-EeaUpdateRelease {
     Start-Process -FilePath $validated.ReleaseUrl -ErrorAction Stop
 }
 
+function Set-EeaSetupWindowSize {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Form,
+        [Drawing.Rectangle]$WorkingArea = [Drawing.Rectangle]::Empty,
+        [switch]$Center
+    )
+
+    if ($Form.WindowState -ne [Windows.Forms.FormWindowState]::Normal) { return }
+    if ($WorkingArea.IsEmpty) { $WorkingArea = [Windows.Forms.Screen]::FromControl($Form).WorkingArea }
+    $maximumWidth = $WorkingArea.Width
+    $maximumHeight = $WorkingArea.Height
+    if ($Form.MaximumSize.Width -gt 0) { $maximumWidth = [Math]::Min($maximumWidth, $Form.MaximumSize.Width) }
+    if ($Form.MaximumSize.Height -gt 0) { $maximumHeight = [Math]::Min($maximumHeight, $Form.MaximumSize.Height) }
+    $Form.MinimumSize = New-Object Drawing.Size([Math]::Min($Form.MinimumSize.Width, $maximumWidth), [Math]::Min($Form.MinimumSize.Height, $maximumHeight))
+    $Form.Size = New-Object Drawing.Size([Math]::Min($Form.Width, $maximumWidth), [Math]::Min($Form.Height, $maximumHeight))
+    for ($layoutPass = 0; $layoutPass -lt 3; $layoutPass++) {
+        $Form.PerformLayout()
+        $viewport = $Form.Tag.EditorViewport
+        $growth = [Math]::Max(0, $viewport.AutoScrollMinSize.Height - $viewport.ClientSize.Height)
+        if ($growth -eq 0 -or $Form.Height -ge $maximumHeight) { break }
+        $Form.Height = [Math]::Min($maximumHeight, $Form.Height + $growth + 2)
+    }
+    if ($Center) {
+        $Form.Location = New-Object Drawing.Point(($WorkingArea.Left + [int](($WorkingArea.Width - $Form.Width) / 2)), ($WorkingArea.Top + [int](($WorkingArea.Height - $Form.Height) / 2)))
+    }
+    elseif ($Form.StartPosition -ne [Windows.Forms.FormStartPosition]::Manual) {
+        $Form.Location = New-Object Drawing.Point([Math]::Max($WorkingArea.Left, [Math]::Min($Form.Left, $WorkingArea.Right - $Form.Width)), [Math]::Max($WorkingArea.Top, [Math]::Min($Form.Top, $WorkingArea.Bottom - $Form.Height)))
+    }
+}
+
 function Set-EeaFormPreferences {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Form, [Parameter(Mandatory = $true)]$Settings)
 
     $ui = $Form.Tag
+    $activeControl = $Form.ActiveControl
     Stop-EeaWebsiteIconLookup $Form
     $ui.Settings = ConvertTo-EeaSettings $Settings
     $ui.SettingsError = ''
@@ -4173,12 +5014,14 @@ function Set-EeaFormPreferences {
         $ui.SettingsMenu.Font = $Form.Font
         if ($ui.AppList.SelectedIndex -lt 0) {
             $ui.DesktopCheck.Checked = $ui.Settings.DefaultDesktop
-            $ui.StartMenuCheck.Checked = $ui.Settings.DefaultStartMenu
+            $ui.StartMenuCheck.Checked = $ui.TaskbarCheck.Checked -or $ui.Settings.DefaultStartMenu
         }
     }
     finally { $ui.UpdatingSettings = $false }
     if (-not $ui.Settings.AutomaticUpdateChecks -and $null -ne $ui.UpdateRequest) { $ui.UpdateRequest.Cancellation.Cancel() }
     $Form.PerformLayout()
+    if ($Form.Visible) { Set-EeaSetupWindowSize -Form $Form }
+    if ($null -ne $activeControl -and $activeControl.CanSelect) { $Form.ActiveControl = $activeControl }
     Start-EeaFormUpdateCheck -Form $Form -Automatic
 }
 
@@ -4392,10 +5235,25 @@ function New-EeaSetupForm {
     $startMenuCheck.AutoSize = $true
     $startMenuCheck.Checked = $true
     $startMenuCheck.Margin = New-Object Windows.Forms.Padding(0, 8, 12, 8)
-    $pinButton = New-EeaButton '&Pin to taskbar...' -Icon Pin -AccessibleName 'Pin saved website to taskbar'
-    $pinButton.AccessibleDescription = 'Save the website first. In File Explorer, right-click its selected shortcut, choose Show more options if needed, then Pin to taskbar.'
-    $pinButton.Enabled = $false
-    $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck, $pinButton))
+    $taskbarCheck = New-EeaCheckBox '&Taskbar' -Icon Pin
+    $taskbarCheck.Margin = New-Object Windows.Forms.Padding(0, 8, 12, 8)
+    $taskbarCheck.AccessibleName = 'Request a taskbar pin for this website'
+    $taskbarCheck.AccessibleDescription = 'Request a Windows taskbar pin when saving. Windows asks for approval. A Start menu entry is required. This app uses its own browser profile and website icon. Unpin using the Windows taskbar menu; clearing this choice does not unpin it.'
+    $taskbarType = Initialize-EeaTaskbarTypes
+    $taskbarSupported = $taskbarType::SupportsPinRequests()
+    $taskbarCheck.Enabled = $taskbarSupported
+    if (-not $taskbarSupported) { $taskbarCheck.AccessibleDescription = 'Native taskbar pin requests are unavailable on this Windows version or are restricted. Update Windows or use Windows to pin the saved shortcut.' }
+    $taskbarToolTip = New-Object Windows.Forms.ToolTip
+    $taskbarToolTip.SetToolTip($taskbarCheck, $taskbarCheck.AccessibleDescription)
+    $taskbarCheck.Add_Disposed({ param($Sender, $EventArgs) $taskbarToolTip.Dispose() }.GetNewClosure())
+    $taskbarCheck.Add_CheckedChanged({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.FindForm()
+        if ($null -eq $ownerForm -or $null -eq $ownerForm.Tag) { return }
+        if ($Sender.Checked) { $ownerForm.Tag.StartMenuCheck.Checked = $true }
+        $ownerForm.Tag.StartMenuCheck.Enabled = -not $Sender.Checked
+    })
+    $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck, $taskbarCheck))
     $editor.Controls.Add($placement, 0, 6)
 
     $freshSessionCheck = New-EeaCheckBox 'Fresh &session each time' -Icon Privacy
@@ -4403,7 +5261,7 @@ function New-EeaSetupForm {
     $freshSessionCheck.TabIndex = 7
     $freshSessionCheck.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 4)
     $freshSessionCheck.AccessibleName = 'Fresh session for this website'
-    $freshSessionCheck.AccessibleDescription = 'Each launch starts with an empty, separate Edge profile. Its cookies, cache, and site data are removed after its windows and browser processes close. You may need to sign in again. Crash or file-lock leftovers are never reused; later launches retry cleanup. Normal Edge data and downloaded files stay unchanged.'
+    $freshSessionCheck.AccessibleDescription = 'Each launch starts with an empty, separate Edge Guest profile without browser sign-in or sync. Its cookies, cache, and site data are removed after its windows and browser processes close. You may need to sign in to the website again. Crash or file-lock leftovers are never reused; later launches retry cleanup. Normal Edge data and downloaded files stay unchanged.'
     $sessionToolTip = New-Object Windows.Forms.ToolTip
     $sessionToolTip.SetToolTip($freshSessionCheck, $freshSessionCheck.AccessibleDescription)
     $freshSessionCheck.Add_Disposed({ param($Sender, $EventArgs) $sessionToolTip.Dispose() }.GetNewClosure())
@@ -4493,9 +5351,14 @@ function New-EeaSetupForm {
         if ($null -ne $dialog -and -not $dialog.IsDisposed) { $dialog.Tag.UpdateSpinner.Advance() }
         Complete-EeaFormUpdateCheck $ownerForm
     })
+    $pinTimer = New-Object Windows.Forms.Timer
+    $pinTimer.Interval = 100
+    $pinTimer.Tag = $form
+    $pinTimer.Add_Tick({ param($Sender, $EventArgs) Complete-EeaTaskbarPin $Sender.Tag })
     $form.Tag = [pscustomobject]@{
         Context = $Context; AppList = $appList; NameInput = $nameInput; UrlInput = $urlInput; NotesInput = $notesInput
-        DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck; PinButton = $pinButton; CustomIcon = $null
+        DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck; TaskbarCheck = $taskbarCheck; CustomIcon = $null
+        TaskbarSupported = $taskbarSupported; PinProcess = $null; PinTimer = $pinTimer; PinAppName = ''; CloseAfterPinRequest = $false; PinCloseDeadline = [DateTime]::MaxValue
         FreshSessionCheck = $freshSessionCheck
         WebsiteIconData = $null; WebsiteIconUrl = $null; IconRequest = $null; IconTimer = $iconTimer; CloseAfterIconLookup = $false
         PendingWebsiteSave = $null; UpdatingWebsite = $false
@@ -4542,6 +5405,8 @@ function New-EeaSetupForm {
     $form.Add_Shown({
         param($Sender, $EventArgs)
         if ($Sender.Tag.SettingsError) { $Sender.Tag.StatusLabel.Text = $Sender.Tag.SettingsError }
+        Set-EeaSetupWindowSize -Form $Sender -Center:($Sender.StartPosition -ne [Windows.Forms.FormStartPosition]::Manual)
+        $Sender.ActiveControl = $Sender.Tag.NameInput
         Write-EeaDebugLog -Event SetupOpened -Settings $Sender.Tag.Settings -Context $Sender.Tag.Context
         try { Start-EeaFormUpdateCheck -Form $Sender -Automatic }
         catch { Write-EeaDebugLog -Event UpdateCheck -Outcome Failed -ErrorType $_.Exception.GetType().Name -Settings $Sender.Tag.Settings -Context $Sender.Tag.Context }
@@ -4551,7 +5416,6 @@ function New-EeaSetupForm {
         param($Sender, $EventArgs)
         $ownerForm = $Sender.FindForm()
         $ui = $ownerForm.Tag
-        $ui.PinButton.Enabled = $Sender.SelectedIndex -ge 0
         if ($Sender.SelectedIndex -lt 0) { return }
         $selected = $Sender.SelectedItem
         Stop-EeaWebsiteIconLookup $ownerForm
@@ -4561,6 +5425,8 @@ function New-EeaSetupForm {
         $ui.NotesInput.Text = if ($null -ne $selected.PSObject.Properties['Notes']) { $selected.Notes } else { '' }
         $ui.DesktopCheck.Checked = $selected.Desktop
         $ui.StartMenuCheck.Checked = $selected.StartMenu
+        $ui.TaskbarCheck.Checked = Get-EeaStateTaskbar $selected
+        $ui.TaskbarCheck.Enabled = $ui.TaskbarSupported -or $ui.TaskbarCheck.Checked
         $ui.FreshSessionCheck.Checked = Get-EeaStateFreshSession $selected
         $ui.CustomIcon = $null
         $ui.WebsiteIconData = $null
@@ -4570,6 +5436,7 @@ function New-EeaSetupForm {
         Set-EeaControlIcon -Control $ui.SaveButton -Icon Save
         $ui.OpenButton.Enabled = $true
         $ui.RemoveButton.Enabled = $true
+        Update-EeaPinControls $ownerForm
         if ($null -ne $ui.IconPreview.Image) { $ui.IconPreview.Image.Dispose(); $ui.IconPreview.Image = $null }
         $paths = Get-EeaPaths $ui.Context $selected.Name
         if ([IO.File]::Exists($paths.Icon)) {
@@ -4627,7 +5494,7 @@ function New-EeaSetupForm {
         $ownerForm = $Sender.FindForm()
         $ui = $ownerForm.Tag
         try {
-            if ($null -ne $ui.IconRequest) { return }
+            if ($null -ne $ui.IconRequest -or $null -ne $ui.PinProcess) { return }
             $cleanName = ConvertTo-EeaName $ui.NameInput.Text
             $website = ConvertTo-EeaWebsite $ui.UrlInput.Text -AllowMissingScheme
             if ($ui.UrlInput.Text.Trim() -notmatch '^https?://') {
@@ -4640,8 +5507,16 @@ function New-EeaSetupForm {
                 if (-not (Confirm-EeaChange $ownerForm ('Replace the address and shortcut settings for "' + $cleanName + '"?') 'Update existing website?')) { return }
             }
             $previousFreshSession = $null -ne $previousState -and (Get-EeaStateFreshSession $previousState)
+            $previousTaskbar = $null -ne $previousState -and (Get-EeaStateTaskbar $previousState)
+            if ($ui.TaskbarCheck.Checked -and -not $previousTaskbar -and -not $ui.FreshSessionCheck.Checked) {
+                if (-not (Confirm-EeaChange $ownerForm 'Use a separate browser profile and website icon for this taskbar app? Sign in once inside the app if needed. Normal Edge data is not copied or changed. Windows will ask you to approve the pin.' 'Use a taskbar app window?')) { return }
+            }
+            elseif (-not $ui.TaskbarCheck.Checked -and $previousTaskbar) {
+                if (-not (Confirm-EeaChange $ownerForm 'Stop requesting a taskbar pin for this website? Unpin its old icon using the Windows taskbar menu. If Fresh session is off, shortcuts return to your normal Edge profile; the separate app profile is kept.' 'Change taskbar app mode?')) { return }
+            }
             if ($ui.FreshSessionCheck.Checked -ne $previousFreshSession) {
-                $message = if ($ui.FreshSessionCheck.Checked) { 'Start this website with an empty temporary Edge profile every time? Sign-ins, cookies, cache, and site data from each session are removed after its browser processes close. A crash or locked files can leave data for later cleanup; it is never reused. Normal Edge profiles and downloaded files are not cleared.' }
+                $message = if ($ui.FreshSessionCheck.Checked) { 'Start this website with an empty temporary Edge Guest profile every time? Browser sign-in and sync are unavailable. Website sign-ins, cookies, cache, and site data from each session are removed after its browser processes close. A crash or locked files can leave data for later cleanup; it is never reused. Normal Edge profiles and downloaded files are not cleared.' }
+                    elseif ($ui.TaskbarCheck.Checked) { 'Keep cookies, cache, and sign-ins in this website''s separate app profile between launches? Normal Edge data is not copied or changed.' }
                     else { 'Return this website to normal browsing? Cookies, cache, and sign-ins can persist in its normal Edge profile.' }
                 if (-not (Confirm-EeaChange $ownerForm $message 'Change website session mode?')) { return }
             }
@@ -4650,24 +5525,21 @@ function New-EeaSetupForm {
             $ui.SaveButton.Enabled = $false
             $ui.StatusLabel.Text = 'Saving...'
             $ui.StatusLabel.Refresh()
-            $installed = Install-EeaApp -AppName $cleanName -Website $website -Notes $ui.NotesInput.Text -CustomIcon $ui.CustomIcon -IconData $ui.WebsiteIconData -Desktop $ui.DesktopCheck.Checked -StartMenu $ui.StartMenuCheck.Checked -FreshSession $ui.FreshSessionCheck.Checked -Context $ui.Context -Confirm:$false
+            $installed = Install-EeaApp -AppName $cleanName -Website $website -Notes $ui.NotesInput.Text -CustomIcon $ui.CustomIcon -IconData $ui.WebsiteIconData -Desktop $ui.DesktopCheck.Checked -StartMenu $ui.StartMenuCheck.Checked -FreshSession $ui.FreshSessionCheck.Checked -Taskbar $ui.TaskbarCheck.Checked -Context $ui.Context -Confirm:$false
             Update-EeaForm -Form $ownerForm -SelectName $installed.Name
             $ui.StatusLabel.Text = 'Saved: ' + $installed.Name
             Write-EeaDebugLog -Event AppSaved -Settings $ui.Settings -Context $ui.Context
+            if (Get-EeaStateTaskbar $installed) {
+                $ownerForm.UseWaitCursor = $false
+                $ui.PinAppName = $installed.Name
+                $ui.PinProcess = Request-EeaTaskbarPin -AppName $installed.Name -Context $ui.Context -Confirm:$false
+                if ($null -eq $ui.PinProcess) { throw 'The website was saved, but Windows did not start the pin request.' }
+                $ui.StatusLabel.Text = 'Saved. Waiting for Windows taskbar approval...'
+                $ui.PinTimer.Start()
+            }
         }
         catch { Show-EeaFormError $ownerForm $_ }
-        finally { $ownerForm.UseWaitCursor = $false; $ui.SaveButton.Enabled = $null -eq $ui.IconRequest }
-    })
-    $pinButton.Add_Click({
-        param($Sender, $EventArgs)
-        $ownerForm = $Sender.FindForm()
-        $ui = $ownerForm.Tag
-        if ($ui.AppList.SelectedIndex -lt 0) { return }
-        try {
-            $null = Show-EeaTaskbarShortcut -AppName $ui.AppList.SelectedItem.Name -Context $ui.Context -Confirm:$false
-            $ui.StatusLabel.Text = 'Finish pinning in File Explorer.'
-        }
-        catch { Show-EeaFormError $ownerForm $_ }
+        finally { $ownerForm.UseWaitCursor = $false; Update-EeaPinControls $ownerForm }
     })
     $openButton.Add_Click({
         param($Sender, $EventArgs)
@@ -4682,6 +5554,7 @@ function New-EeaSetupForm {
         param($Sender, $EventArgs)
         $ownerForm = $Sender.FindForm()
         $ui = $ownerForm.Tag
+        if ($null -ne $ui.PinProcess) { return }
         if (-not (Confirm-EeaChange $ownerForm ('Remove the shortcuts for "' + $ui.NameInput.Text + '"? Your website account, passwords, and browser data will stay.') 'Remove website shortcuts?')) { return }
         try {
             $removedName = $ui.NameInput.Text
@@ -4694,6 +5567,12 @@ function New-EeaSetupForm {
     })
     $form.Add_FormClosing({
         param($Sender, $EventArgs)
+        if ($null -ne $Sender.Tag.PinProcess) {
+            if (-not $Sender.Tag.CloseAfterPinRequest) { $Sender.Tag.PinCloseDeadline = [DateTime]::UtcNow.AddSeconds(5) }
+            $Sender.Tag.CloseAfterPinRequest = $true
+            $EventArgs.Cancel = $true
+            $Sender.DialogResult = [Windows.Forms.DialogResult]::None
+        }
         if ($null -ne $Sender.Tag.UpdateRequest) {
             $Sender.Tag.CloseAfterUpdateCheck = $true
             $Sender.Tag.UpdateRequest.Cancellation.Cancel()
@@ -4709,6 +5588,14 @@ function New-EeaSetupForm {
     })
     $form.Add_Disposed({
         param($Sender, $EventArgs)
+        $Sender.Tag.PinTimer.Stop()
+        $Sender.Tag.PinTimer.Dispose()
+        $Sender.Tag.PinTimer.Tag = $null
+        if ($null -ne $Sender.Tag.PinProcess) {
+            try { if (-not $Sender.Tag.PinProcess.HasExited) { $Sender.Tag.PinProcess.Kill() } }
+            catch { }
+            finally { $Sender.Tag.PinProcess.Dispose(); $Sender.Tag.PinProcess = $null }
+        }
         $Sender.Tag.UpdateTimer.Stop()
         $Sender.Tag.UpdateTimer.Dispose()
         $Sender.Tag.UpdateTimer.Tag = $null
@@ -5308,14 +6195,14 @@ function Update-EeaSelectionForm {
     elseif ($ui.Mode -eq 'Import') {
         $rows = @(Get-EeaKitPreview -Kit $ui.Kit -Context $ui.Context | ForEach-Object {
             $status = if ($_.DomainChanged) { 'Update: DOMAIN CHANGE' } else { $_.Action }
-            [pscustomobject]@{ Name = $_.Name; Status = $status; Url = $_.Url; Detail = $_.Detail; CanSelect = ($_.Action -in @('Add', 'Update')); Data = $_; Description = ('Current: ' + $_.CurrentUrl + "`r`nNew: " + $_.Url + "`r`n" + $_.Detail + "`r`nDesktop: " + $_.App.Desktop + '   Start menu: ' + $_.App.StartMenu + "`r`nApp notes: " + $_.App.Notes + "`r`nKit notes: " + $ui.Kit.Notes) }
+            [pscustomobject]@{ Name = $_.Name; Status = $status; Url = $_.Url; Detail = $_.Detail; CanSelect = ($_.Action -in @('Add', 'Update')); Data = $_; Description = ('Current: ' + $_.CurrentUrl + "`r`nNew: " + $_.Url + "`r`nCurrent browsing: " + $_.CurrentBrowsingMode + "`r`nAfter import: " + $_.BrowsingMode + "`r`n" + $_.Detail + "`r`nDesktop: " + $_.App.Desktop + '   Start menu: ' + $_.App.StartMenu + "`r`nApp notes: " + $_.App.Notes + "`r`nKit notes: " + $ui.Kit.Notes) }
         })
     }
     else {
         $rows = @(Get-EeaChecks -Context $ui.Context | ForEach-Object {
             $website = if ($null -ne $_.State) { $_.State.Url } else { '' }
             $detail = if ($_.Issues.Count -gt 0) { $_.Issues -join ' ' } else { 'Owned shortcuts are present. Website access was not tested.' }
-            [pscustomobject]@{ Name = $_.Name; Status = $_.Status; Url = $website; Detail = $detail; CanSelect = $_.CanRepair; Data = $_; Description = $detail }
+            [pscustomobject]@{ Name = $_.Name; Status = $_.Status; Url = $website; Detail = $detail; CanSelect = $_.CanRepair; Data = $_; Description = ('Configured browsing: ' + $_.BrowsingMode + "`r`n" + $detail) }
         })
     }
     Set-EeaSelectionRows -Form $Form -Rows $rows

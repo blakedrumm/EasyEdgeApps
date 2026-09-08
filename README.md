@@ -6,21 +6,23 @@
 
 Turn trusted websites into easy-to-find Microsoft Edge app-window shortcuts on Windows 11. Install Easy Edge Apps as a normal Windows application, or use the same self-contained PowerShell script as a portable tool.
 
-A helper sets it up once in the person's Windows account. Everyday use is opening a familiar Desktop, Start menu, or manually pinned taskbar shortcut, with no PowerShell window or administrator prompt. Normal shortcuts open Edge directly; optional fresh sessions use a small Windows launcher while that session is open.
+A helper sets it up once in the person's Windows account. Everyday use is opening a familiar Desktop, Start menu, or approved taskbar shortcut, with no PowerShell window or administrator prompt. Normal shortcuts open Edge directly; taskbar apps and fresh sessions use a small Windows launcher while their app window is open.
 
 Set up someone's everyday websites once. Restore and maintain that familiar setup whenever they need help.
 
-[Download MSI (x64)](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps-1.3.2-x64.msi) | [Download portable script](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps.ps1) | [Latest release](https://github.com/blakedrumm/EasyEdgeApps/releases/latest) | [Automated checks](https://github.com/blakedrumm/EasyEdgeApps/actions/workflows/test.yml)
+[Download MSI (x64)](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps-1.3.3-x64.msi) | [Download portable script](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps.ps1) | [Latest release](https://github.com/blakedrumm/EasyEdgeApps/releases/latest) | [Automated checks](https://github.com/blakedrumm/EasyEdgeApps/actions/workflows/test.yml)
 
-**Version 1.3.2:** Adds **Fresh session each time**, an opt-in choice for each website. Each launch gets an empty, separate Edge profile, with cookies, cache, and site data removed after that session's browser processes close. Normal Edge profiles stay untouched. The choice travels in App Kits. Encrypted exports remain experimental and require independent security review before production use. See the [release notes](docs/releases/v1.3.2.md).
+**Version 1.3.3:** Adds a **Taskbar** checkbox that requests a real Windows-approved pin and keeps the website window under its own icon. Taskbar apps use dedicated profiles; **Fresh session each time** instead uses independent Guest profiles and fixes the repeated Edge account/sync popup. Normal Edge data stays untouched. After updating from 1.3.2, close fresh windows and use **Check apps... > Repair Selected** to update their launchers. Encrypted exports remain experimental and require independent security review before production use. See the [release notes](docs/releases/v1.3.3.md).
+
+This release also fits setup to the available monitor space, improves high-resolution background painting, explains blocked icon retrieval, and shows current and proposed browsing modes in maintenance/import details. See the [production-readiness review](docs/Production-Readiness-Review.md) for measured results, retained compatibility, and outstanding acceptance limits.
 
 ## Setup for a family member
 
 1. Sign in to **the Windows account that will use the shortcuts**. Do not run setup as administrator or as another user.
-2. Download and open **EasyEdgeApps-1.3.2-x64.msi**. Complete its installation wizard, then open **Easy Edge Apps** from Start. The installer is per-user and does not request administrator rights.
-3. Open the gear menu and **Preferences...** to choose a default Edge profile or adjust text size, placement, and motion. For the portable option, download **EasyEdgeApps.ps1** instead and use **Run with PowerShell**, or the one-time command below. No other manager download is needed; fresh-session launchers are generated locally when selected.
-4. Enter a familiar name, such as **My Mail**, and the website address. You can omit `https://`; **Add website** and **Get icon** resolve a missing scheme HTTPS-first. Optionally select **Get icon** to retrieve its website icon. Leave Desktop and Start menu selected unless you deliberately want only one location. To start with empty cookies and cache every time, select **Fresh session each time** for this website; leave it off to retain normal sign-ins.
-5. Select **Add website**, then **Open**. Complete any Edge first-run prompts and website sign-in together. Check the site's text size, links, and any printing or video calling the person needs. For optional taskbar access, follow [Pin a website to the taskbar](#pin-a-website-to-the-taskbar).
+2. Download and open **EasyEdgeApps-1.3.3-x64.msi**. Complete its installation wizard, then open **Easy Edge Apps** from Start. The installer is per-user and does not request administrator rights.
+3. Open the gear menu and **Preferences...** to choose a default Edge profile or adjust text size, placement, and motion. For the portable option, download **EasyEdgeApps.ps1** instead and use **Run with PowerShell**, or the one-time command below. No other manager download is needed; website launchers are generated locally when selected.
+4. Enter a familiar name, such as **My Mail**, and the website address. You can omit `https://`; **Add website** and **Get icon** resolve a missing scheme HTTPS-first. Optionally select **Get icon** to retrieve its website icon. Select **Taskbar** for a dedicated app window and a Windows pin request; its required Start menu entry stays selected. To start with empty cookies and cache every time, also select **Fresh session each time** for this website.
+5. Select **Add website**, approve any profile-mode change and Windows pin confirmation, then open the saved shortcut or taskbar icon. Complete website sign-in together. Check the site's text size, links, and any printing or video calling the person needs. See [Pin a website to the taskbar](#pin-a-website-to-the-taskbar) for support requirements and retained-data behavior.
 6. Close setup. The person can now open the website using its shortcut. Return through **Easy Edge Apps** in Start for future changes, or keep the portable script somewhere the helper can find it.
 
 For the portable script downloaded to the usual Downloads folder:
@@ -33,38 +35,44 @@ This execution-policy option applies only to that PowerShell process. It does no
 
 Use ordinary site addresses, not password-reset links, one-time sign-in links, or URLs containing secrets. Addresses, including query strings and fragments, are saved locally in clear text.
 
-![The setup window with a saved website, Fresh session each time, Pin to taskbar, and the Settings gear.](docs/images/setup.png)
+![The setup window with a saved website, Taskbar and Fresh session each time checkboxes, and the Settings gear.](docs/images/setup.png)
 
-The screenshot shows version 1.3.2 with animation paused and synthetic example data.
+The screenshot uses paused animation and synthetic example data.
 
 ## Fresh sessions per website
 
 Select a saved website, check **Fresh session each time**, select **Save changes**, and approve the session-mode change. For a new website, check it before **Add website**. This is off by default and applies only to that website, not every website or your normal Edge browser.
 
-Every launch from its saved shortcut gets a new temporary Edge profile with empty cookies, cache, local storage, and other site data. Two launches are independent, even for the same website. Closing one does not reset another. The small Windows launcher stays open without a console, tracks that session's browser process tree, and removes only its own temporary profile after the tree exits. Close related popup windows too; a remaining session process can delay cleanup. PowerShell and the manager do not need to stay open while browsing.
+Every launch from its saved shortcut gets a new temporary Edge Guest profile with empty cookies, cache, local storage, and other site data. Guest mode prevents Edge browser-account sign-in and sync, including the repeated automatic-sign-in popup. Website sign-in is separate and remains available. Two launches are independent, even for the same website. Closing one does not reset another. The small Windows launcher stays open without a console, tracks that session's browser process tree, and removes only its own temporary profile after the tree exits. Close related popup windows too; a remaining session process can delay cleanup. PowerShell and the manager do not need to stay open while browsing.
 
-Normal Edge profile data is neither copied nor cleared. A stored normal-profile selection is retained for when fresh sessions are turned off. Sign-ins and site preferences usually need repeating, but Windows or site single sign-on can still authenticate independently; this is not a guaranteed anonymous or signed-out mode. Downloaded files outside the temporary profile remain. External links or applications that leave this profile are outside its cleanup scope.
+**Existing fresh websites from 1.3.2:** Close their windows, update the manager to 1.3.3 or later, open **Check apps...**, select the repairable websites, then **Repair Selected** and approve. Saving each website again also rebuilds its launcher. Installing the new MSI alone does not replace these per-website executables. The updated app window shows **[Guest]** in its title; there is no need to remove and recreate the website.
+
+Normal Edge profile data is neither copied nor cleared. A stored normal-profile selection is retained for when both Fresh and Taskbar are off. Turning Fresh off while Taskbar remains selected uses that website's persistent dedicated app profile instead. Sign-ins and site preferences usually need repeating in fresh sessions, but Windows or site single sign-on can still authenticate independently; this is not a guaranteed anonymous or signed-out mode. Downloaded files outside the temporary profile remain. External links or applications that leave this profile are outside its cleanup scope.
 
 Cleanup is not secure erasure. A crash, power loss, permission failure, or persistent file lock can leave marked data on disk. That profile is never reused, and the next fresh launch of the same website retries cleanup. A cleanup failure shows a warning. Resolve warnings before disabling or removing the website: those operations do not sweep leftover session folders. Normal browsing, downloaded files, operating-system traces, and server-side records are not erased.
 
-Fresh sessions require Windows 11 x64, a non-elevated user session, Edge, and the Windows .NET Framework compiler when saving, importing, or repairing the website. No SDK download is needed. A policy that overrides Edge's `UserDataDir` blocks fresh launches; organization controls may also block generated executables. The tool does not change policies or fall back to a normal profile. Close that website's fresh windows before changing or removing it. A missing or changed launcher needs **Check and Repair**; modified files are not silently overwritten.
+Fresh sessions require Windows 11 x64, a non-elevated user session, Edge with Guest mode available, and the Windows .NET Framework compiler when saving, importing, or repairing the website. No SDK download is needed. Policies that override Edge's `UserDataDir`, disable `BrowserGuestModeEnabled`, or force `BrowserSignin` block fresh launches; organization controls may also block generated executables. The tool does not change policies or fall back to a normal profile. Close that website's fresh windows before changing or removing it. A missing or changed launcher needs **Check and Repair**; modified files are not silently overwritten.
 
-After changing session mode, unpin any old taskbar entry and pin the newly saved shortcut again. A pin made directly from an Edge window can bypass this launcher and must not be assumed to reset data. See the [taskbar workflow](#pin-a-website-to-the-taskbar) and [security boundaries](SECURITY.md#fresh-session-boundaries).
+For taskbar access, use the **Taskbar** checkbox and approve Windows' request. Replace older pins that target Edge directly: they bypass the fresh-session launcher. Unpin before switching both Fresh and Taskbar off or removing the website. See the [taskbar workflow](#pin-a-website-to-the-taskbar) and [security boundaries](SECURITY.md#fresh-session-boundaries).
 
 ## Pin a website to the taskbar
 
-1. Select a saved website. Save any changes you want the taskbar shortcut to use first.
-2. Select **Pin to taskbar...** beside Desktop and Start menu. File Explorer opens with the saved shortcut selected.
-3. Right-click the selected shortcut, choose **Show more options** if needed, then **Pin to taskbar**.
-4. Open the new taskbar shortcut and check that it opens the intended website and Edge profile.
+1. Select a saved website, or enter a new one. Check **Taskbar** beside Desktop and Start menu. Start menu stays selected because Windows needs that entry.
+2. Select **Save changes** or **Add website**. Approve the dedicated-profile change when requested. With Fresh off, sign in once inside the new app profile; normal Edge sign-ins are not copied.
+3. Approve **Windows' own pin confirmation**. Activate the small window bearing the website's name if Windows is waiting for foreground interaction. Setup reports success only after Windows confirms the pin. An already pinned app does not need another approval.
+4. Open the new taskbar icon. The Edge app window uses the saved website icon and identity, grouped with that pin instead of a separate Edge taskbar entry.
 
-This is a manual Windows pinning flow, not an automatic placement checkbox. The command prefers the owned Start menu shortcut and falls back to the owned Desktop shortcut. It does not save editor changes, open the website, invoke hidden pinning verbs, change taskbar registry data, or report a pin as completed. Missing or changed shortcuts need **Check and Repair** first. Windows policy and shell behavior can restrict pinning; the tool does not bypass those restrictions.
+**Profile behavior:** Taskbar with Fresh off keeps a dedicated browser profile for that website. Reopening a running app focuses its existing window. Taskbar with Fresh on creates a separate empty Guest profile on every launch; multiple launches remain independent but share the website's taskbar group. These are real Edge app windows, not a browser embedded in the setup window. The manager can close while they remain open. Edge security and website popups still apply; normal Edge windows are not relabeled or closed.
 
-Windows owns the pin and may keep a separate shortcut copy. After changing a website's address, profile, session mode, or icon, unpin and pin it again if the taskbar entry is stale. For fresh sessions, pin the saved launcher shortcut, not the Edge window. Unpin a website before removing it from the manager. App Kits, Check and Repair, and MSI maintenance do not create, refresh, or remove taskbar pins. Windows may group these app windows with Edge; use Edge's own **Install this site as an app** when you need a registered web app, with its own separate data-lifetime behavior.
+**Windows support:** Native desktop pin requests require a compatible, updated Windows 11 shell. Microsoft removed the token requirement in KB5074105 (builds 26100.7705/26200.7705); the app checks runtime capability. Policy, notifications, foreground restrictions, or a missing Start entry can still prevent approval. Unsupported systems show the checkbox disabled. The tool does not use hidden pinning verbs, edit taskbar registry data, or bypass policy. A declined, cancelled, or unavailable pin leaves the website saved in the chosen app mode. Select **Save changes** again to retry.
+
+The checkbox stores the local request and app mode, not Windows' live pin state. **Unpin using the Windows taskbar menu** before removing the website or opting out; clearing the checkbox does not unpin it. Persistent app data is retained after enabling Fresh, opting out, removal, or MSI maintenance; Fresh cleans only its new temporary sessions. Windows caches pin icons, so unpin and save again if an icon is stale. App Kits do not transfer this choice or pin state, and imports/repair never request pins. A kit that removes an existing taskbar app's Start entry is blocked in preview.
 
 ## Settings and updates
 
 Open the gear menu, then **Preferences...**. Settings are grouped into **Updates**, **Websites**, **Appearance**, and **Diagnostics**, with related controls on shared rows. All four sections fit at the default text size; enlarged text remains scrollable, with **Save settings** and **Cancel** at the bottom right. Changes take effect after **Save settings**; **Cancel** discards unsaved choices. The main window's **Motion** checkbox saves its choice immediately.
+
+Setup opens at a normal window size and grows vertically to fit its editor when the current monitor has room. Saved text sizes are measured after layout; the window stays within the working area instead of forcing maximization. Smaller displays retain scrolling. The website-name field receives initial keyboard focus, and changing preferences preserves the active field and any required Start menu placement for Taskbar.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
@@ -87,11 +95,11 @@ Debug logs record event names, outcomes, UTC timestamps, application/host versio
 
 ## Installed application
 
-The x64 MSI places the manager, portable script, license, and notices in `%LOCALAPPDATA%\Programs\Easy Edge Apps`. It registers **Easy Edge Apps** with Windows Installer and Installed Apps and creates a manager shortcut in Start. The manager launcher runs Windows PowerShell only while the management window is open. Normal website shortcuts launch Edge directly; fresh shortcuts use their separately generated per-website executable, without PowerShell.
+The x64 MSI places the manager, portable script, license, and notices in `%LOCALAPPDATA%\Programs\Easy Edge Apps`. It registers **Easy Edge Apps** with Windows Installer and Installed Apps and creates a manager shortcut in Start. The manager launcher runs Windows PowerShell only while the management window is open. Normal website shortcuts launch Edge directly; Fresh and Taskbar shortcuts use their separately generated per-website executable, without PowerShell.
 
 Install newer MSIs in the same Windows account to upgrade. Older MSI versions are rejected. Reopening the installed MSI offers maintenance; repair restores application files and the manager shortcut. To uninstall, use **Settings > Apps > Installed apps > Easy Edge Apps**. Uninstall removes the manager's files and shortcut, but preserves saved websites, their shortcuts, preferences, logs, and browser data. Remove unwanted website shortcuts through the manager before uninstalling it, or reinstall later to manage them again.
 
-Portable and MSI copies use the same per-user website data. There is no migration or browser-data transfer. Fresh websites and schema-2 kits require 1.3.2 or later; older versions reject them. MSI maintenance does not rebuild generated session launchers; use **Check and Repair** after an update if they are reported outdated. See [installer build and maintenance details](docs/Installer.md).
+Portable and MSI copies use the same per-user website data. There is no browser-data transfer. New or repaired Fresh/Taskbar apps use local manifest schema 3 and require 1.3.3 or later; older versions reject them. Existing schema-2 fresh apps remain readable and repairable. Portable kit schemas stay at 1 and 2; schema-2 kits require 1.3.2 or later. MSI maintenance does not rebuild generated launchers; use **Check and Repair** after an update if they are reported outdated. See [installer build and maintenance details](docs/Installer.md).
 
 ## Everyday experience
 
@@ -99,11 +107,14 @@ Portable and MSI copies use the same per-user website data. There is no migratio
 - Edge opens the website in app mode and requests a maximized window. Edge and Windows ultimately control window placement.
 - A distinctive, locally generated letter icon, an existing `.ico` file, or an explicitly retrieved website icon. No third-party favicon service is used.
 - Edge chooses the launch profile by default. A helper can select a default for new apps in Settings; each saved app retains its own optional profile identifier. Website sign-ins and browser security remain in Edge's control.
-- **Fresh session each time** optionally starts a website in an independent empty profile and cleans up its cookies, cache, and site data after that session closes. It is off by default.
+- **Fresh session each time** optionally starts a website in an independent empty Guest profile without Edge account sync and cleans up its cookies, cache, and site data after that session closes. It is off by default.
+- **Taskbar** requests a Windows-approved pin and gives the website its own window identity and icon. It uses a separate persistent app profile unless Fresh is also selected. Both options are off by default.
 - Setup uses native Windows controls, keyboard navigation, accessible names, and a resizable layout. Primary actions follow Windows highlight colors; high contrast restores system-colored controls. Destructive confirmation defaults to **No**.
 - The application logo is embedded in the script for the setup header and window icons; no separate branding file or download is needed at runtime.
 - **Windows-style controls:** Buttons, field/status labels, and checkboxes have icons, primary actions use system highlight colors, and textboxes support Ctrl+Backspace word deletion. Icons use the installed Segoe Fluent Icons font, falling back to Segoe MDL2 Assets or text-only controls. No fonts are bundled or downloaded. Text labels and keyboard navigation remain available; compact navigation buttons also have full accessible names and tooltips.
 - **Space background:** Setup has an original procedural starfield with stars scattered across a dark sky, noticeable independent drift, and softly eased mouse parallax. There are no spiral arms, central glow, or orbital motion. Stars keep moving when the mouse is outside the window or another application has focus. Clear **Motion** to pause it. Windows reduced-motion settings and remote sessions keep the scene still; high contrast removes it. Animation also pauses while setup is hidden, minimized, or being resized. The background is rendered locally inside the single script, with no web view, asset downloads, or background service. Website shortcuts are unaffected.
+
+Background generation remains capped at 1920 pixels on its longest side. Larger windows use fast, opaque pixel scaling; partial repaints honor their clipping region. Adaptive pacing includes background-paint time as well as frame generation and retains the existing battery and accessibility limits. This favors responsive controls over a guaranteed frame rate on every display.
 
 The intended setup operator is a helper. The person using the shortcuts does not need to manage PowerShell.
 
@@ -120,6 +131,8 @@ Enter the website address and select **Get icon** beside the icon preview. Setup
 An animated loading ring stays visible while the address or icon is resolving, downloading, or converting. Lookup runs in the background. The adjacent cancel button stops it; changing the address, selecting another website, or closing setup cancels a pending lookup. The spinner stops after completion or cancellation cleanup. Failed lookups leave the current icon unchanged. No website or icon request is made just by typing an address, opening setup, or importing a kit. Separately enabled update checks contact GitHub only.
 
 Retrieval contacts the entered website and its icon or redirect destinations directly. HTTPS requests never downgrade to HTTP; an explicitly selected or resolved HTTP site can use HTTP images. It does not use browser cookies, saved passwords, Windows credentials, or a third-party favicon service. Only retrieve icons from trusted websites and never enter URLs containing secrets. Sites that need sign-in, block automated requests, or use unsupported SVG features may require **Choose icon...** instead. SVG scripts, CSS, external references, embedded images, and overly complex graphics are rejected.
+
+Failures distinguish blocked requests, missing icons, unsupported formats, timeouts, and connection problems without displaying response bodies or private server errors. During 1.3.3 testing, ChatGPT returned HTTP 403 to the application's credential-free page and favicon requests. The app now explains that refusal and offers **Choose icon...** for a local `.ico` file; it cannot guarantee automatic retrieval from a site that refuses it. It does not borrow browser sessions, run bot challenges, or guess manifest locations. The current icon stays unchanged.
 
 Discovery reads at most the first 512 KiB of HTML, so larger pages can still provide an icon. Image downloads have no fixed file-size cutoff: they stream to a randomly named, automatically deleted temporary file instead of accumulating the original image in memory. Windows downsampling and fixed-size SVG rendering produce an aspect-preserving, transparent 128-pixel `.ico`, normally about 66 KiB. Large source dimensions are resized rather than rejected for exceeding 1024 pixels. Available disk space, decoder capabilities, malformed data, and rendering-resource limits still apply.
 
@@ -146,6 +159,8 @@ Only locally present Stable Edge `Default` and `Profile <number>` profiles are o
 ## Portable App Kits
 
 An App Kit is one named `.eeakit.json` file containing selected website names, explicit HTTPS or HTTP addresses, Desktop/Start menu choices, optional plain-text helper notes, portable icons, and fresh-session choices when using schema 2. Generated icons and fresh-session executables are recreated locally; custom icons are embedded as validated bytes. No installed paths, executables, browser data, credentials, browser flags, profile identifiers, global preferences, commands, or original icon-file dependencies are included.
+
+Taskbar app mode and Windows pin state stay local. Imports preserve an existing destination's Taskbar choice and never ask Windows to pin; a new imported website defaults to Taskbar off. A kit cannot remove the Start menu entry required by an existing taskbar app until that app's Taskbar choice is explicitly cleared in setup.
 
 Exports containing a fresh website use schema 2 and require application 1.3.2 or later, including protected exports. A schema-2 import explicitly applies each website's session choice; the preview flags changes back to persistent browsing. Schema-1 kits remain supported and preserve an existing destination website's fresh-session choice. Exports containing only normal websites remain schema 1 for compatibility. See the [format contract](docs/App-Kit-Format.md).
 
@@ -174,14 +189,18 @@ Password protection applies **only to the exported file**. Installed settings, s
 
 Select **Check apps...** for read-only diagnostics. Select repairable rows and **Repair Selected** to review and approve repairs. The main window keeps Check apps accessible even when saved settings are damaged.
 
+Select a row to see **Configured browsing**: normal Edge, a persistent dedicated app profile, or a temporary Fresh Guest session. This describes validated settings, not a live browser or pin-state test; repair an outdated launcher before relying on its configured mode. Import details show **Current browsing** and **After import**, including destination-local Taskbar and kit-version Fresh rules.
+
 | Status | Meaning |
 | --- | --- |
 | Healthy | Owned local files match saved settings; the website was not tested |
-| Repairable | A shortcut, icon, or fresh launcher is missing, or owned launch files need the current Edge path or launcher source |
+| Repairable | A shortcut, icon, or app launcher is missing, or owned launch files need the current Edge path or launcher source |
 | Conflict | Settings or owned artifacts are damaged, modified, ambiguous, or occupied by unrelated files |
 | Blocked | Edge is unavailable, a path is unsafe/unreadable, or pending recovery needs attention |
 
 Repair recreates only verified owned artifacts at safely unoccupied destinations. A missing custom icon becomes an automatic letter icon unless restored from a trusted kit. Modified or undecodable existing icons and shortcuts are conflicts, not permission to overwrite. If files change after the check, a fresh check is required. Pending recovery and unknown files are preserved.
+
+An app folder without its settings remains a non-repairable conflict. It may contain deliberately retained browser data or reflect missing/damaged installation state; an ownership marker alone cannot prove which. Check reports that uncertainty without deleting the folder, recreating settings, or silently hiding it.
 
 Repair does not probe private URLs, sign in, repair accounts, bypass permissions, or diagnose outages. A repaired shortcut is not proof that the website works.
 
@@ -287,7 +306,9 @@ Import, export, and repair request confirmation by default. In reviewed automati
 
 ## What it does not do
 
-The websites are **Edge app-window shortcuts**, not fully registered Progressive Web Apps. They do not gain independent Installed Apps entries, guaranteed taskbar identities, or automatic Start/taskbar pinning. The MSI registers the **Easy Edge Apps manager**, not each website. Windows may group website windows with Edge. Use Edge's own **Install this site as an app** feature when native PWA registration is required.
+The websites are **Edge app-window shortcuts**, not fully registered Progressive Web Apps. They do not gain independent Installed Apps entries or silent taskbar pinning. The MSI registers the **Easy Edge Apps manager**, not each website. Normal direct shortcuts may group with Edge; Fresh/Taskbar launchers assign a website identity to their owned windows, subject to Windows shell behavior. Use Edge's own **Install this site as an app** feature when native PWA registration is required.
+
+Choose Easy Edge Apps for helper-managed website collections, portable App Kits without browser credentials, explicit per-site Fresh sessions or dedicated profiles, and ownership-checked repair. Choose Edge's native installation for registered PWA integration. These are different workflows, not a universal claim that one is better for every website or user.
 
 It does not bypass pop-up blockers, grant camera or microphone permissions, change the default browser, configure auto-login, suppress website prompts, disable security checks, or modify browser policies. It is not a kiosk or a security boundary. Some sign-in links and external links can open a normal browser window.
 
@@ -301,6 +322,7 @@ All changes are scoped to the current user:
 | --- | --- |
 | `%LOCALAPPDATA%\EasyEdgeApps\Apps\<app-id>\` | Validated settings, saved icon, and optional owned `fresh-session.exe` |
 | `%LOCALAPPDATA%\EasyEdgeApps\Apps\<app-id>\Sessions\<session-id>\` | A marked temporary profile for one fresh launch, removed after its browser process tree exits |
+| `%LOCALAPPDATA%\EasyEdgeApps\Apps\<app-id>\AppProfile\` | A marked dedicated profile retained between taskbar app launches when Fresh is off |
 | Windows-resolved Desktop | Selected `.lnk` shortcuts |
 | Windows-resolved Programs\Easy Edge Apps | Selected Start menu shortcuts |
 | `%LOCALAPPDATA%\EasyEdgeApps\.pending\` | Temporary staging and rollback files while making a change |
@@ -311,7 +333,7 @@ All changes are scoped to the current user:
 
 Known folders are resolved through Windows rather than assuming a fixed Desktop path. Symbolic links and junctions in managed locations are rejected. Ordinary redirected folders are supported, but real OneDrive synchronization and unusual network filesystems require a check on the target computer. Shortcuts and locally stored icons are computer-specific; syncing a shortcut to another PC is not an installation there.
 
-App IDs use SHA-256 of normalized names. Saved file paths are never used to choose where to write or delete. Shortcuts are checked against their ownership marker, expected executable, arguments, and icon location. Saved icons and fresh-session launchers are hashed to detect outside changes. These checks protect against accidental replacement; someone who can change both your files and settings under the same Windows account is not a separate security boundary.
+App IDs use SHA-256 of normalized names. Saved file paths are never used to choose where to write or delete. Shortcuts are checked against their ownership marker, expected executable, arguments, icon location, and schema-3 Windows app identity. Saved icons and app launchers are hashed to detect outside changes. These checks protect against accidental replacement; someone who can change both your files and settings under the same Windows account is not a separate security boundary.
 
 Updates stage all output first, copy recovery data, use same-directory atomic replacement for each file, and write settings last. Caught failures trigger rollback. A per-user, per-Windows-session mutex prevents simultaneous changes in the same session. Operations spanning several files are not a single filesystem transaction and cannot guarantee crash or power-loss atomicity.
 
@@ -326,7 +348,7 @@ If setup reports that an earlier change needs recovery, stop making changes and 
 3. A technically competent helper should check each path belongs to this user's affected Easy Edge Apps entry, then restore the previous owned files from the available backups. Newly created files have `Existed: false` and should only be removed after verifying ownership. Leave unrelated files alone.
 4. Only after confirming the installed entry is consistent, move the remaining `.pending` folder aside and run setup again. Keep the recovery copy until the website works.
 
-A `complete.txt` file containing `EasyEdgeApps:complete:1` means the operation completed or was successfully rolled back, but Windows temporarily prevented cleanup. Saved websites remain usable. The next change retries cleanup; do not disable antivirus to clear a file lock.
+A `complete.txt` file containing `EasyEdgeApps:complete:1` means the operation completed or was successfully rolled back, but Windows temporarily prevented cleanup, for example because of a lock or read-only staging file. Saved websites remain usable. The next change retries cleanup; do not disable antivirus or relax permissions indiscriminately to remove temporary files.
 
 ## Verification and development
 
@@ -350,21 +372,26 @@ Run all isolated suites and parser checks for the current host, or both installe
 .\tests\Invoke-Tests.ps1 -BothHosts -ScreenshotDirectory "$env:TEMP\EasyEdgeApps-captures"
 ```
 
-The fourteen suites cover the existing core, JSON portability, Favorites discovery/import, website icon retrieval, strict settings and private logging, fixed-endpoint update checks, taskbar pinning assistance, fresh-session safety, App Kits and repair, RFC cryptographic known-answer tests, encrypted files and bidirectional host interoperability, public CLI binding/dispatch, and both native GUI surfaces. Offline fixtures cover redirects, bounded responses, real background workers, cancellation, profile preservation, update states, and daily-check throttling. GUI checks cover actual modal font inheritance, 12/18/24-point layouts, spinner pixels, explicit saving, stale results, damaged-preference recovery, and the taskbar button's saved-selection and failure states. Taskbar tests capture Explorer launches and verify quoted paths, ownership, placement fallback, and unchanged saved files without changing real pins. The CLI harness runs the unchanged public parameter block and dispatcher through a temporary script file to verify real script exit codes and profile/session launch routing. It redirects known-folder dependencies into temporary storage and captures browser launches instead of opening Edge. It never redirects your actual Windows folders. Interoperability tests require both `powershell.exe` and `pwsh.exe`.
+The fourteen suites cover core behavior, JSON portability, Favorites discovery/import, website icons, strict settings and private logging, fixed-endpoint updates, native taskbar identity, fresh-session safety, App Kits and repair, RFC cryptographic vectors, encrypted files and bidirectional host interoperability, public CLI dispatch, and both native GUI surfaces. Fixtures cover redirects, bounded responses, background workers, cancellation, profile preservation, update states, and daily throttling. GUI checks include modal font inheritance, 12/18/24-point layouts, spinner pixels, explicit/stale saves, damaged preferences, and taskbar consent, outcomes, closing races, and conflicting-action guards. Taskbar tests round-trip real shortcut/window identities and make read-only Windows state queries, but mock pin requests and never alter actual pins. The CLI harness uses the public parameter block and dispatcher in a temporary script, redirects its known-folder dependencies into temporary storage, and captures browser launches; it never redirects your actual Windows folders. Interoperability tests require both `powershell.exe` and `pwsh.exe`.
 
 Local verification uses Windows 11 Enterprise build **26200**, Windows PowerShell **5.1.26100.8875**, and PowerShell **7.6.5**, without elevation. The Windows workflow invokes the same runner in each host and separately builds and tests the MSI. Installer checks cover actual install, upgrade from a synthetic older-version package, downgrade rejection, repair, per-user registration, complete notices, and uninstall preservation. A compiled-launcher probe verifies an STA Windows PowerShell process with no console or forwarded arguments. Enlarged-font layout tests cap windows to 1024 by 768 and include rendered-icon pixel checks. They do not replace physical high-DPI, high-contrast, Narrator, multi-monitor, or real-site testing with the intended user.
 
-A native Explorer smoke check verified that the taskbar command selects the intended synthetic shortcut. The final Windows menu command, pin creation, and subsequent pinned launch still need manual verification on the intended computer; automated tests deliberately do not alter the user's taskbar.
+Interactive acceptance on Windows build **26200.9106** verified user-approved native pin creation, launch from the pin into one Guest app window with matching website identity, visible grouping under one website icon without a separate Edge entry, and Windows-confirmed removal of the synthetic pin. Other Windows/Edge versions and managed environments still need target-machine checks; ordinary automated suites never alter the user's taskbar.
 
 Before handing over this version, exercise a protected-kit transfer between two real Windows accounts/computers, the intended Edge profile's Favorites selection, recovery/file-lock behavior, and any OneDrive or network-backed destination. Review the custom crypto composition independently before using encrypted exports for sensitive production data. Private `.eeakit.json` files are ignored by Git; never force-add real kits, passwords, or browser fixtures.
 
-The explicit local browser test below opens three real Edge app sessions against a synthetic loopback site. With Edge **152.0.4191.66**, it verifies empty cookies and local storage, independent cache fetches, closing one session while another stays open, a clean relaunch, and complete temporary-profile removal. It does not use browser debugging flags or touch normal profiles, and is deliberately outside the ordinary CI suites. It needs an interactive, non-elevated desktop and Windows PowerShell 5.1:
+The explicit local browser tests below open real Edge app sessions against a synthetic loopback site. With Edge **152.0.4191.66**, Fresh verifies empty cookies/storage, independent cache fetches, independent closure, clean relaunch, and profile removal. `-Persistent` verifies retained cookies/storage/cache across three launches and reuses a running website's single window. Both verify website taskbar identity without browser debugging flags or normal-profile changes. They require an interactive, non-elevated desktop and Windows PowerShell 5.1, and are outside ordinary CI:
 
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-EasyEdgeAppsFreshSessionBrowser.ps1
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-EasyEdgeAppsFreshSessionBrowser.ps1 -Persistent
 ```
 
-The isolated fresh-session suite also exercises continuous allocation leases, long paths, child processes outliving their parent, launcher interruption, locked files, junction rejection, malformed metadata, launcher tampering, in-use rollback, and portable session choices. Live managed-policy/elevated rejection, real-site sign-in, and pinned-launch behavior still need target-machine acceptance checks.
+Optional `-ScreenshotDirectory .\artifacts\browser-screenshots` requires foreground focus, visible synthetic content, and a nonblank screen capture. Windows may deny foreground access to a background runner; that is a capture restriction, not proof of a browser-state failure. GPU `PrintWindow` images are not used as visual proof.
+
+For explicit manual pin acceptance, run `powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-EasyEdgeAppsTaskbarBrowser.ps1 -Interactive`. Unlike ordinary suites, this creates one uniquely named real Start menu entry and asks you to approve a real taskbar pin, launch it, inspect its grouping, and unpin it. Cleanup touches only the verified synthetic app and retains its files if Windows cannot confirm it was unpinned.
+
+The isolated fresh-session suite also exercises continuous leases, long paths, complete child-tree lifetime, interruption, locks, junctions, malformed metadata, launcher tampering, in-use rollback, schema-2 repair, and portable session choices. Live managed-policy/elevated rejection, real-site sign-in, and physical accessibility still need target-machine acceptance checks.
 
 Release assets include the portable script, x64 MSI, WiX's corresponding source archive, and a SHA-256 checksum file. Run `Get-FileHash` on the script or MSI with `-Algorithm SHA256` and compare it with the checksum from the same release. A checksum detects a mismatched or corrupted download; it is not a code-signing certificate. Installer builds use pinned WiX 5.0.2 and UI components; [WiX notices and source attribution](installer/WiX-Notices.txt) are included with the installed renderer notices.
 

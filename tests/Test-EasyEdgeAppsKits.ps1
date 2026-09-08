@@ -108,6 +108,50 @@ try {
         $null = Repair-EeaApps -AppNames @('My News') -Context $destination -WhatIf
         Assert-Kit (-not [IO.File]::Exists($paths.StartMenu)) 'Repair WhatIf must leave missing files missing.'
     }
+    Test-KitCase 'Configured browsing summaries match independent modes and kit outcomes' {
+        $modeContext = New-KitTestContext 'BrowsingModes'
+        foreach ($fresh in @($false, $true)) {
+            foreach ($taskbar in @($false, $true)) {
+                $appName = 'Mode ' + $fresh + ' ' + $taskbar
+                $saved = Install-EeaApp -AppName $appName -Website 'https://example.com/' -FreshSession $fresh -Taskbar $taskbar -Context $modeContext -Confirm:$false
+                $expectedCurrent = if ($fresh) { 'Fresh Guest session (temporary)' } elseif ($taskbar) { 'Dedicated app profile (persistent)' } else { 'Normal Edge profile' }
+                Assert-Kit ((Get-EeaChecks -AppNames $appName -Context $modeContext).BrowsingMode -ceq $expectedCurrent) 'Check must derive the configured mode from validated settings, with Fresh taking precedence.'
+                foreach ($kitCase in @(@{ Version = 1; Fresh = $null }, @{ Version = 2; Fresh = $false }, @{ Version = 2; Fresh = $true }, @{ Version = 2; Fresh = $null })) {
+                    $modeKit = Copy-TestKit $script:Kit
+                    $modeKit.SchemaVersion = $kitCase.Version
+                    $modeKit.Apps[0].Name = $appName
+                    if ($null -ne $kitCase.Fresh) { $modeKit.Apps[0] | Add-Member -NotePropertyName FreshSession -NotePropertyValue $kitCase.Fresh }
+                    $nextFresh = if ($kitCase.Version -eq 1) { Get-EeaStateFreshSession $saved } else { [bool]$kitCase.Fresh }
+                    $expectedAfter = if ($nextFresh) { 'Fresh Guest session (temporary)' } elseif ($taskbar) { 'Dedicated app profile (persistent)' } else { 'Normal Edge profile' }
+                    $preview = Get-EeaKitPreview -Kit $modeKit -Context $modeContext
+                    Assert-Kit ($preview.CurrentBrowsingMode -ceq $expectedCurrent -and $preview.BrowsingMode -ceq $expectedAfter) 'Import preview must preserve schema-1 Fresh choices and local Taskbar, while applying schema-2 false or missing as false.'
+                    $result = Import-EeaKit -Kit $modeKit -ExpectedPreview @($preview) -Context $modeContext -Confirm:$false
+                    $saved = Read-EeaManifest $modeContext $appName
+                    Assert-Kit ($result.Completed -and (Get-EeaStateFreshSession $saved) -eq $nextFresh -and (Get-EeaStateTaskbar $saved) -eq $taskbar -and (Get-EeaChecks -AppNames $appName -Context $modeContext).BrowsingMode -ceq $expectedAfter) 'The actual imported mode must match the preview without importing a Taskbar choice.'
+                    $expectedCurrent = $expectedAfter
+                }
+            }
+        }
+    }
+    Test-KitCase 'Missing settings disclose unknown removal intent without hiding retained data' {
+        foreach ($removed in @($false, $true)) {
+            $retainedContext = New-KitTestContext ('Retained-' + $removed)
+            $null = Install-EeaApp -AppName 'Retained app' -Website 'https://example.com/' -Context $retainedContext -Confirm:$false
+            $paths = Get-EeaPaths $retainedContext 'Retained app'
+            $profilePath = Join-Path $paths.Directory 'AppProfile'
+            [void][IO.Directory]::CreateDirectory($profilePath)
+            $cookiePath = Join-Path $profilePath 'Cookies'
+            [IO.File]::WriteAllText($cookiePath, 'Synthetic retained data')
+            [IO.File]::WriteAllText((Join-Path $profilePath '.eea-app-profile'), 'EasyEdgeApps.AppProfile:1')
+            if ($removed) { Remove-EeaApp -AppName 'Retained app' -Context $retainedContext -Confirm:$false }
+            else { [IO.File]::Delete($paths.Manifest) }
+            $before = (Get-FileHash -LiteralPath $cookiePath).Hash
+            foreach ($checks in @(@(Get-EeaChecks -Context $retainedContext), @(Get-EeaChecks -AppNames 'Retained app' -Context $retainedContext))) {
+                Assert-Kit ($checks.Count -eq 1 -and $checks[0].Status -ceq 'Conflict' -and -not $checks[0].CanRepair -and $checks[0].BrowsingMode -ceq 'Unknown' -and ($checks[0].Issues -join ' ').Contains('removal intent is unknown')) 'Check must retain non-repairable uncertainty for both removed and damaged missing-manifest folders.'
+            }
+            Assert-Kit ((Get-FileHash -LiteralPath $cookiePath).Hash -ceq $before -and -not [IO.File]::Exists($paths.Manifest)) 'Read-only diagnostics must never recreate settings or modify retained browser data.'
+        }
+    }
     Test-KitCase 'Repair restores missing shortcuts and icons without testing websites' {
         $paths = Get-EeaPaths $destination 'My News'
         [IO.File]::Delete($paths.Icon)

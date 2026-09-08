@@ -31,6 +31,22 @@ try {
     Write-EeaSessionLauncher -Path $launcherPath -Website 'https://example.com/?query=a%22b#/home' -EdgePath (Find-EeaEdge)
     $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($launcherPath))
     Assert-FreshSession ($null -ne $assembly.GetType('EeaFreshSession')) 'The self-contained native session launcher must compile.'
+    foreach ($requestResult in @(0, 3, 4)) {
+        foreach ($pinState in @(0, 3, 4)) {
+            $confirmedResult = [EeaFreshSession]::ConfirmPinResult($requestResult, $pinState)
+            Assert-FreshSession (($confirmedResult -eq 0) -eq ($pinState -eq 0)) 'Pin success must depend on verified Windows pin state, not the prompt process result alone.'
+            if ($pinState -ne 0) { Assert-FreshSession ($confirmedResult -eq $(if ($requestResult -eq 3 -and $pinState -eq 3) { 3 } else { 4 })) 'Unconfirmed pin results must distinguish explicit cancellation from unavailability without reporting success.' }
+        }
+    }
+    [EeaFreshSession]::CheckPolicyValues($null, $null, $null)
+    [EeaFreshSession]::CheckPolicyValues($null, 1, 0)
+    [EeaFreshSession]::CheckPolicyValues($null, 1, 1)
+    Assert-FreshSessionRejected { [EeaFreshSession]::CheckPolicyValues('C:\UnrelatedProfile', $null, $null) }
+    Assert-FreshSessionRejected { [EeaFreshSession]::CheckPolicyValues($null, 0, $null) }
+    Assert-FreshSessionRejected { [EeaFreshSession]::CheckPolicyValues($null, $null, 2) }
+    Assert-FreshSessionRejected { [EeaFreshSession]::CheckPolicyValues($null, 1, 2) }
+    Assert-FreshSessionRejected { [EeaFreshSession]::CheckPolicyValues($null, '1', $null) }
+    Assert-FreshSessionRejected { [EeaFreshSession]::CheckPolicyValues($null, $null, '1') }
     $sessionsRoot = Join-Path $testRoot 'Sessions'
     $firstSession = [EeaFreshSession]::CreateSession($sessionsRoot)
     $secondSession = [EeaFreshSession]::CreateSession($sessionsRoot)
@@ -58,7 +74,22 @@ try {
     [IO.File]::WriteAllText($invalidMarkerPath, 'EasyEdgeApps.FreshSession:1')
     Assert-FreshSession ([EeaFreshSession]::TryCleanup($sessionsRoot, $invalidMarkerSession)) 'The exact owned marker must remain usable.'
     $arguments = [EeaFreshSession]::Arguments('https://example.com/?query=a%22b#/home', (Join-Path $testRoot 'Profile with spaces'))
-    Assert-FreshSession ($arguments.Contains('--user-data-dir="') -and $arguments.Contains('--disable-background-mode') -and -not $arguments.Contains('--profile-directory')) 'Fresh launches must isolate user data without requesting a normal profile.'
+    Assert-FreshSession ($arguments.Contains('--user-data-dir="') -and $arguments.Contains(' --guest ') -and $arguments.Contains('--disable-background-mode') -and -not $arguments.Contains('--profile-directory')) 'Fresh launches must use an isolated Guest profile without browser account sign-in or sync.'
+    Assert-FreshSession (-not (Get-EeaArguments 'https://example.com/' -EdgeProfile 'Profile 1').Contains('--guest')) 'Normal launches must keep their selected persistent profile without Guest mode.'
+    $appProfile = Join-Path $testRoot 'AppProfile'
+    $appLease = [EeaFreshSession]::OpenAppProfile($appProfile)
+    try {
+        Assert-FreshSessionRejected { [EeaFreshSession]::OpenAppProfile($appProfile) }
+        [IO.File]::WriteAllText((Join-Path $appProfile 'Cookies'), 'Synthetic retained app data.')
+    }
+    finally { $appLease.Dispose() }
+    $appLease = [EeaFreshSession]::OpenAppProfile($appProfile)
+    $appLease.Dispose()
+    Assert-FreshSession ([IO.File]::Exists((Join-Path $appProfile 'Cookies'))) 'An owned persistent app profile must retain browser data on reopen.'
+    Assert-FreshSession (-not [EeaFreshSession]::TryCleanup($sessionsRoot, $appProfile)) 'Fresh cleanup must never remove a persistent app profile.'
+    Assert-FreshSessionRejected { [EeaFreshSession]::OpenAppProfile($unrelated) }
+    $persistentArguments = [EeaFreshSession]::Arguments('https://example.com/', (Join-Path $appProfile 'Profile'), $false)
+    Assert-FreshSession ($persistentArguments.Contains('--user-data-dir="') -and -not $persistentArguments.Contains('--guest') -and -not $persistentArguments.Contains('--profile-directory')) 'Persistent app windows must retain their dedicated profile without using the normal Edge profile.'
     $processSession = [EeaFreshSession]::CreateSession($sessionsRoot)
     $markerPath = Join-Path $processSession 'completed.txt'
     $commandPath = Join-Path $env:WINDIR 'System32\cmd.exe'
@@ -98,7 +129,7 @@ try {
     $saved = Install-EeaApp -AppName 'Fresh test' -Website 'https://example.com/' -EdgeProfile 'Profile 1' -FreshSession $true -Context $context -Confirm:$false
     $paths = Get-EeaPaths $context $saved.Name
     $shortcut = Read-EeaShortcut $paths.Desktop
-    Assert-FreshSession ($saved.SchemaVersion -eq 2 -and (Get-EeaStateFreshSession $saved) -and $saved.EdgeProfile -ceq 'Profile 1') 'Fresh apps must use a fail-closed schema while retaining the normal-profile choice.'
+    Assert-FreshSession ($saved.SchemaVersion -eq 3 -and (Get-EeaStateFreshSession $saved) -and -not (Get-EeaStateTaskbar $saved) -and $saved.EdgeProfile -ceq 'Profile 1') 'Fresh apps must use a fail-closed app-window schema while retaining the normal-profile choice.'
     Assert-FreshSession ($shortcut.TargetPath -ieq $paths.Launcher -and $shortcut.Arguments -ceq '' -and (Test-EeaOwnedShortcut $paths.Desktop $saved $paths)) 'Fresh shortcuts must target only their owned no-argument native launcher.'
     $manifestBytes = [IO.File]::ReadAllBytes($paths.Manifest)
     try {
@@ -108,6 +139,10 @@ try {
             { param($candidate) $candidate.FreshSession = $false },
             { param($candidate) $candidate.FreshSession = 'true' },
             { param($candidate) $candidate.PSObject.Properties.Remove('FreshSession') },
+            { param($candidate) $candidate.Taskbar = 'true' },
+            { param($candidate) $candidate.PSObject.Properties.Remove('Taskbar') },
+            { param($candidate) $candidate.Taskbar = $true; $candidate.StartMenu = $false },
+            { param($candidate) $candidate.SchemaVersion = 2; $candidate.Taskbar = $true },
             { param($candidate) $candidate.LauncherHash = 'invalid' },
             { param($candidate) $candidate.PSObject.Properties.Remove('LauncherSourceHash') }
         )) {
@@ -156,6 +191,36 @@ try {
     Assert-FreshSession ((Get-EeaChecks -AppNames $saved.Name -Context $context).Status -ceq 'Repairable') 'Missing launchers must be repairable without a normal-profile launch fallback.'
     $repair = Repair-EeaApps -AppNames $saved.Name -Context $context -Confirm:$false
     Assert-FreshSession ($repair.Completed -and [IO.File]::Exists($paths.Launcher) -and (Get-EeaStateFreshSession (Read-EeaManifest $context $saved.Name))) 'Repair must restore the launcher and preserve the session choice.'
+    $script:CurrentSessionSource = ${function:Get-EeaSessionLauncherSource}
+    try {
+        function Get-EeaSessionLauncherSource {
+            param($Website, $EdgePath, $AppName, [bool]$FreshSession = $true)
+            $currentSource = & $script:CurrentSessionSource -Website $Website -EdgePath $EdgePath -AppName $AppName -FreshSession $FreshSession
+            $olderSource = $currentSource.Replace('(fresh ? " --guest" : "")', '(fresh ? "" : "")')
+            if ($olderSource -ceq $currentSource) { throw 'The older-launcher fixture must omit Guest mode.' }
+            return $olderSource
+        }
+        $olderState = Install-EeaApp -AppName $saved.Name -Website $saved.Url -Context $context -Confirm:$false
+    }
+    finally { Set-Item -LiteralPath Function:\Get-EeaSessionLauncherSource -Value $script:CurrentSessionSource }
+    $legacyState = ConvertFrom-EeaJson ($olderState | ConvertTo-Json -Depth 8)
+    $legacyState.SchemaVersion = 2
+    $legacyState.PSObject.Properties.Remove('Taskbar')
+    [IO.File]::WriteAllText($paths.Manifest, ($legacyState | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+    $taskbarType = Initialize-EeaTaskbarTypes
+    foreach ($shortcutPath in @($paths.Desktop, $paths.StartMenu)) {
+        $legacyShortcut = Read-EeaShortcut $shortcutPath
+        [IO.File]::Delete($shortcutPath)
+        Write-EeaShortcut -Path $shortcutPath -Target $legacyShortcut.TargetPath -Arguments $legacyShortcut.Arguments -Description $legacyShortcut.Description -Icon $legacyShortcut.IconLocation
+        Assert-FreshSession ($taskbarType::GetShortcutAppId($shortcutPath) -ceq '') 'The v1.3.2 fixture must have an ordinary launcher shortcut without an explicit Windows app identity.'
+    }
+    Assert-FreshSession ((Get-EeaChecks -AppNames $saved.Name -Context $context).Status -ceq 'Repairable') 'Existing pre-Guest launchers must be reported for repair after an application update.'
+    $repair = Repair-EeaApps -AppNames $saved.Name -Context $context -Confirm:$false
+    $upgradedState = Read-EeaManifest $context $saved.Name
+    $expectedSourceHash = Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes((Get-EeaSessionLauncherSource -Website $saved.Url -EdgePath $saved.EdgePath -AppName $saved.Name)))
+    Assert-FreshSession ($repair.Completed -and $upgradedState.LauncherSourceHash -cne $olderState.LauncherSourceHash -and $upgradedState.LauncherSourceHash -ceq $expectedSourceHash -and (Get-EeaStateFreshSession $upgradedState) -and (Get-EeaChecks -AppNames $saved.Name -Context $context).Status -ceq 'Healthy') 'Repair must replace the owned older launcher with the current Guest-mode source and preserve fresh sessions.'
+    Assert-FreshSession ($upgradedState.SchemaVersion -eq 3 -and -not (Get-EeaStateTaskbar $upgradedState) -and $taskbarType::GetShortcutAppId($paths.StartMenu) -ceq ('EasyEdgeApps.Website.' + $paths.Id)) 'Repair must migrate a schema-2 launcher to the current website identity without requesting a taskbar pin.'
+    Write-Host 'PASS: Guest-only arguments, conflicting-policy rejection without registry changes, and repair of pre-Guest launchers.'
     $kit = New-EeaKit -Context $context
     Assert-FreshSession ($kit.SchemaVersion -eq 2 -and $kit.Apps[0].FreshSession -and $null -eq $kit.Apps[0].PSObject.Properties['LauncherHash'] -and $null -eq $kit.Apps[0].PSObject.Properties['EdgeProfile']) 'Portable session choices require version 2 without executable, profile, or browser data.'
     $destination = [pscustomobject]@{ Root = (Join-Path $testRoot 'Destination\Data'); Desktop = (Join-Path $testRoot 'Destination\Desktop'); Programs = (Join-Path $testRoot 'Destination\Programs') }

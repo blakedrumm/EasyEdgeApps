@@ -225,6 +225,7 @@ try {
     Show-ToolTestForm $importForm
     Test-ToolFormLayout $importForm 'import'
     Assert-ToolGui ($importForm.Tag.Grid.Rows.Count -eq 1 -and -not $importForm.Tag.ApplyButton.Enabled) 'Import preview must start unselected.'
+    Assert-ToolGui ($importForm.Tag.Grid.Rows[0].Tag.Description.Contains('Current browsing: Not saved') -and $importForm.Tag.Grid.Rows[0].Tag.Description.Contains('After import: Normal Edge profile')) 'Import details must expose the resulting browsing mode before approval.'
     Assert-ToolGui (-not (Test-Path -LiteralPath $destination.Root)) 'Opening import preview must not install.'
     $importForm.Tag.AllCheck.Checked = $true
     $script:ApproveChange = $false
@@ -278,6 +279,7 @@ try {
     $checkForm = New-EeaSelectionForm -Mode Check -Context $destination
     Show-ToolTestForm $checkForm
     Test-ToolFormLayout $checkForm 'check'
+    Assert-ToolGui ($checkForm.Tag.Grid.Rows[0].Tag.Description.Contains('Configured browsing: Normal Edge profile') -and $checkForm.Tag.Details.ReadOnly) 'Check must expose configured browsing in its existing accessible read-only details.'
     $checkForm.Tag.AllCheck.Checked = $true
     $script:ApproveChange = $false
     $checkForm.Tag.ApplyButton.PerformClick()

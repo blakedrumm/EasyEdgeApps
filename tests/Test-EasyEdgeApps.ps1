@@ -182,6 +182,33 @@ try {
         Install-EeaApp -AppName 'My News' -Website 'https://example.com/new?size=large#/home' -Context $context -Confirm:$false | Out-Null
         Assert-EeaReady $context
     }
+    Test-Case 'Committed changes survive access-denied temporary cleanup and retry safely' {
+        $cleanupContext = [pscustomobject]@{ Root = Join-Path $testRoot 'CompletedCleanup'; Desktop = $context.Desktop; Programs = $context.Programs }
+        $pendingPath = Join-Path $cleanupContext.Root '.pending'
+        $readOnlyPath = Join-Path $pendingPath 'staged\read-only.tmp'
+        $destinationPath = Join-Path $cleanupContext.Root 'committed.txt'
+        try {
+            Invoke-EeaTransaction -Context $cleanupContext -WarningAction SilentlyContinue -Prepare {
+                param($StagePath)
+                $sourcePath = Join-Path $StagePath 'change.txt'
+                [IO.File]::WriteAllText($sourcePath, 'Committed value')
+                [IO.File]::WriteAllText($readOnlyPath, 'Temporary residue')
+                [IO.File]::SetAttributes($readOnlyPath, [IO.FileAttributes]::ReadOnly)
+                [pscustomobject]@{ Path = $destinationPath; Source = $sourcePath }
+            }
+            Assert-Equal ([IO.File]::ReadAllText($destinationPath)) 'Committed value'
+            Assert-Equal ([IO.File]::ReadAllText((Join-Path $pendingPath 'complete.txt'))) 'EasyEdgeApps:complete:1'
+            Assert-EeaReady $cleanupContext
+            [IO.File]::SetAttributes($readOnlyPath, [IO.FileAttributes]::Normal)
+            Invoke-EeaTransaction -Context $cleanupContext -Prepare { param($StagePath) }
+            Assert-Equal ([IO.Directory]::Exists($pendingPath)) $false
+            Assert-Equal ([IO.File]::ReadAllText($destinationPath)) 'Committed value'
+        }
+        finally {
+            if ([IO.File]::Exists($readOnlyPath)) { [IO.File]::SetAttributes($readOnlyPath, [IO.FileAttributes]::Normal) }
+            if ([IO.Directory]::Exists($pendingPath)) { [IO.Directory]::Delete($pendingPath, $true) }
+        }
+    }
     Test-Case 'An interrupted transaction blocks further changes and keeps recovery files' {
         $interruptedContext = [pscustomobject]@{
             Root = Join-Path $testRoot 'Interrupted'

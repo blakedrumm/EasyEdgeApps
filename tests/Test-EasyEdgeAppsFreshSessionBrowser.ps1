@@ -1,7 +1,7 @@
 #requires -Version 5.1
 
 [CmdletBinding()]
-param([switch]$DiagnoseCleanup)
+param([switch]$DiagnoseCleanup, [string]$ScreenshotDirectory, [switch]$Persistent)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -10,17 +10,19 @@ if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this interactive brows
 if ($DiagnoseCleanup) {
     $script:FreshSessionSourceFactory = ${function:Get-EeaSessionLauncherSource}
     function Get-EeaSessionLauncherSource {
-        param($Website, $EdgePath)
-        $generatedSource = & $script:FreshSessionSourceFactory -Website $Website -EdgePath $EdgePath
+        param($Website, $EdgePath, $AppName, [bool]$FreshSession = $true)
+        $generatedSource = & $script:FreshSessionSourceFactory -Website $Website -EdgePath $EdgePath -AppName $AppName -FreshSession $FreshSession
         foreach ($exceptionType in @('IOException', 'UnauthorizedAccessException', 'InvalidOperationException')) {
             $generatedSource = $generatedSource.Replace(('catch (' + $exceptionType + ') { return false; }'), ('catch (' + $exceptionType + ' failure) { File.WriteAllText(Path.Combine(root, "cleanup-error.txt"), failure.ToString()); return false; }'))
         }
         return $generatedSource
     }
 }
-Add-Type -ReferencedAssemblies System, System.Core -TypeDefinition @'
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
+Add-Type -ReferencedAssemblies System, System.Core, System.Drawing -TypeDefinition @'
 using System;
 using System.Collections.Concurrent;
+using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -119,7 +121,17 @@ public sealed class FreshSessionHttpProbe : IDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr window, StringBuilder text, int maximum);
     [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr window, out WindowRectangle rectangle);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmFlush();
+    [DllImport("user32.dll")]
     private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr word, IntPtr data, uint flags, uint timeout, out UIntPtr result);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowRectangle { public int Left; public int Top; public int Right; public int Bottom; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -150,9 +162,10 @@ public sealed class FreshSessionHttpProbe : IDisposable
         }
         finally { Marshal.FreeHGlobal(information); CloseHandle(job); }
     }
-    public static int CloseTestWindows(int process)
+    public static IntPtr FindTestWindow(int process)
     {
-        int closed = 0;
+        IntPtr found = IntPtr.Zero;
+        int count = 0;
         EnumWindows(delegate(IntPtr window, IntPtr state)
         {
             uint owner;
@@ -161,11 +174,47 @@ public sealed class FreshSessionHttpProbe : IDisposable
             StringBuilder title = new StringBuilder(512);
             GetWindowText(window, title, title.Capacity);
             if (title.ToString().IndexOf("Easy Edge Apps fresh-session test", StringComparison.Ordinal) < 0) return true;
-            UIntPtr result;
-            if (SendMessageTimeout(window, 16, IntPtr.Zero, IntPtr.Zero, 2, 3000, out result) != IntPtr.Zero) closed++;
+            found = window;
+            count++;
             return true;
         }, IntPtr.Zero);
-        return closed;
+        if (count > 1) throw new InvalidOperationException("More than one owned test window was found.");
+        return found;
+    }
+    public static void ActivateTestWindow(int process)
+    {
+        IntPtr window = FindTestWindow(process);
+        if (window == IntPtr.Zero) throw new InvalidOperationException("The owned test window is unavailable.");
+        if (GetForegroundWindow() != window) SetForegroundWindow(window);
+        if (GetForegroundWindow() != window) throw new InvalidOperationException("The test window could not receive foreground focus.");
+        DwmFlush();
+    }
+    public static void CaptureTestWindow(int process, string path)
+    {
+        IntPtr window = FindTestWindow(process);
+        WindowRectangle rectangle;
+        if (window == IntPtr.Zero || !GetWindowRect(window, out rectangle)) throw new InvalidOperationException("The owned test window is unavailable.");
+        if (GetForegroundWindow() != window) SetForegroundWindow(window);
+        if (GetForegroundWindow() != window) throw new InvalidOperationException("The test window is not foreground; no screen content was captured.");
+        DwmFlush();
+        using (Bitmap image = new Bitmap(rectangle.Right - rectangle.Left, rectangle.Bottom - rectangle.Top))
+        using (Graphics graphics = Graphics.FromImage(image))
+        {
+            graphics.CopyFromScreen(rectangle.Left, rectangle.Top, 0, 0, image.Size, CopyPixelOperation.SourceCopy);
+            System.Collections.Generic.HashSet<int> colors = new System.Collections.Generic.HashSet<int>();
+            for (int pixelY = 45; pixelY < Math.Min(300, image.Height); pixelY += 2)
+                for (int pixelX = 15; pixelX < Math.Min(700, image.Width); pixelX += 2)
+                    colors.Add(image.GetPixel(pixelX, pixelY).ToArgb());
+            if (colors.Count < 16) throw new InvalidOperationException("The browser content capture is blank.");
+            image.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        }
+    }
+    public static int CloseTestWindows(int process)
+    {
+        IntPtr window = FindTestWindow(process);
+        if (window == IntPtr.Zero) return 0;
+        UIntPtr result;
+        return SendMessageTimeout(window, 16, IntPtr.Zero, IntPtr.Zero, 2, 3000, out result) != IntPtr.Zero ? 1 : 0;
     }
     public void Dispose()
     {
@@ -180,6 +229,59 @@ public sealed class FreshSessionHttpProbe : IDisposable
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('EasyEdgeApps.NativeSessionSmoke.' + [Guid]::NewGuid().ToString('N'))
 $sessions = New-Object 'Collections.Generic.List[object]'
 $server = New-Object FreshSessionHttpProbe
+$taskbarType = Initialize-EeaTaskbarTypes
+
+function Assert-FreshGuestWindow {
+    param($Session, [int]$LaunchNumber)
+    if (-not $Persistent -and -not [IO.Directory]::Exists((Join-Path $Session.Directory 'Profile\Guest Profile'))) { throw 'The fresh session did not create an isolated Guest profile.' }
+    $ownedBrowsers = @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Session.Directory) })
+    $windowCount = 0
+    foreach ($browser in $ownedBrowsers) {
+        $window = [FreshSessionHttpProbe]::FindTestWindow($browser.ProcessId)
+        if ($window -eq [IntPtr]::Zero) { continue }
+        $windowCount++
+        if ($ScreenshotDirectory) { [FreshSessionHttpProbe]::ActivateTestWindow($browser.ProcessId) }
+        $identityDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $windowAppId = $taskbarType::GetWindowAppId($window)
+            if ($windowAppId -eq $script:ExpectedWindowAppId) { break }
+            [Windows.Forms.Application]::DoEvents()
+        } while ([DateTime]::UtcNow -lt $identityDeadline)
+        if ($windowAppId -cne $script:ExpectedWindowAppId) { throw ('The website window did not retain its own taskbar identity: ' + $windowAppId) }
+        try {
+            $automationRoot = [Windows.Automation.AutomationElement]::FromHandle($window)
+            $controls = $automationRoot.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+            $promptFound = @($controls | Where-Object { $_.Current.Name -match 'syncing your browsing data|has signed in on this device' }).Count -gt 0
+            if (-not $Persistent -and $promptFound) { throw 'Edge displayed the automatic browser sign-in or sync prompt in a fresh Guest session.' }
+            if ($ScreenshotDirectory) {
+                $contentCondition = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, 'Synthetic fresh-session test')
+                $contentDeadline = [DateTime]::UtcNow.AddSeconds(5)
+                do {
+                    $content = $automationRoot.FindFirst([Windows.Automation.TreeScope]::Descendants, $contentCondition)
+                    if ($null -ne $content) { break }
+                    [Windows.Forms.Application]::DoEvents()
+                } while ([DateTime]::UtcNow -lt $contentDeadline)
+                if ($null -eq $content) { throw 'Foreground screenshot requires the rendered synthetic heading in UI Automation.' }
+                [void][IO.Directory]::CreateDirectory($ScreenshotDirectory)
+                $captureName = if ($Persistent) { 'persistent-launch-' } else { 'guest-launch-' }
+                [FreshSessionHttpProbe]::CaptureTestWindow($browser.ProcessId, (Join-Path $ScreenshotDirectory ($captureName + $LaunchNumber + '.png')))
+            }
+        }
+        finally {
+            $controls = $null
+            $automationRoot = $null
+            $content = $null
+            $contentCondition = $null
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+        }
+    }
+    if ($windowCount -ne 1) { throw 'Each test launch must retain exactly one owned website window.' }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    if ($Persistent) { Write-Host ('PASS: Persistent launch ' + $LaunchNumber + ' retains exactly one website window with its own taskbar identity.') }
+    else { Write-Host ('PASS: Launch ' + $LaunchNumber + ' uses an isolated Guest profile without the reported automatic sign-in or sync dialog and retains its website taskbar identity.') }
+}
 
 function Close-FreshTestSession {
     param($Session)
@@ -192,6 +294,10 @@ function Close-FreshTestSession {
         if ($Session.Process.HasExited) { Write-Host ('Test launcher exit code: ' + $Session.Process.ExitCode) }
         $remainingBrowsers = @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Session.Directory) })
         Write-Host ('Remaining owned browser processes: ' + $remainingBrowsers.Count)
+        foreach ($browser in $remainingBrowsers) {
+            $processType = if ($browser.CommandLine -match '--type=([^\s]+)') { $Matches[1] } else { 'browser' }
+            Write-Host ('Remaining owned process type: ' + $processType + '; test window present = ' + ([FreshSessionHttpProbe]::FindTestWindow($browser.ProcessId) -ne [IntPtr]::Zero))
+        }
         Write-Host ([FreshSessionHttpProbe]::DescribeJob($Session.Directory))
         $diagnosticFile = Join-Path ([IO.Path]::GetDirectoryName($Session.Directory)) 'cleanup-error.txt'
         if ($DiagnoseCleanup -and [IO.File]::Exists($diagnosticFile)) { Write-Host ([IO.File]::ReadAllText($diagnosticFile)) }
@@ -200,22 +306,47 @@ function Close-FreshTestSession {
         }
         throw 'The fresh-session launcher did not cleanly complete after normal window closure.'
     }
-    if ([IO.Directory]::Exists($Session.Directory)) { throw 'The closed session profile was not removed.' }
+    if ($Persistent) {
+        if (-not [IO.Directory]::Exists($Session.Directory)) { throw 'A persistent app profile was unexpectedly removed.' }
+    }
+    elseif ([IO.Directory]::Exists($Session.Directory)) { throw 'The closed session profile was not removed.' }
 }
 
 try {
     [void][IO.Directory]::CreateDirectory($testRoot)
     $launcher = Join-Path $testRoot 'fresh-session.exe'
-    Write-EeaSessionLauncher -Path $launcher -Website ($server.Origin + '/app') -EdgePath (Find-EeaEdge)
+    New-EeaIcon -Path (Join-Path $testRoot 'icon.ico') -AppName 'Taskbar test'
+    Write-EeaSessionLauncher -Path $launcher -Website ($server.Origin + '/app') -EdgePath (Find-EeaEdge) -AppName 'Taskbar test' -FreshSession:(-not $Persistent)
+    $launcherAssembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($launcher))
+    $launcherType = $launcherAssembly.GetType('EeaFreshSession')
+    $script:ExpectedWindowAppId = $launcherType::AppId((Join-Path $testRoot 'Sessions'))
     foreach ($launchNumber in @(1, 2, 3)) {
         $process = Start-Process -FilePath $launcher -PassThru
         $session = [pscustomobject]@{ Process = $process; Directory = '' }
         $sessions.Add($session)
         $report = ConvertFrom-EeaJson ($server.WaitForReport())
-        if ($report.before.cookie -cne '' -or $null -ne $report.before.storage -or $report.cache -cne ('cache-' + $launchNumber)) { throw 'The fresh session reused synthetic browser data.' }
-        $newDirectories = @([IO.Directory]::GetDirectories((Join-Path $testRoot 'Sessions')) | Where-Object { $sessions.Directory -cnotcontains $_ })
-        if ($newDirectories.Count -ne 1) { throw 'Each launch must have exactly one new owned session directory.' }
-        $session.Directory = $newDirectories[0]
+        if ($Persistent -and $launchNumber -gt 1) {
+            if ($report.before.cookie -cne 'eeaProbe=synthetic' -or $report.before.storage -cne 'synthetic' -or $report.cache -cne 'cache-1') { throw 'The persistent app did not retain its synthetic cookies, local storage, and cache.' }
+        }
+        elseif ($report.before.cookie -cne '' -or $null -ne $report.before.storage -or $report.cache -cne ('cache-' + $launchNumber)) { throw 'The fresh session reused synthetic browser data.' }
+        if ($Persistent) { $session.Directory = Join-Path $testRoot 'AppProfile' }
+        else {
+            $newDirectories = @([IO.Directory]::GetDirectories((Join-Path $testRoot 'Sessions')) | Where-Object { $sessions.Directory -cnotcontains $_ })
+            if ($newDirectories.Count -ne 1) { throw 'Each launch must have exactly one new owned session directory.' }
+            $session.Directory = $newDirectories[0]
+        }
+        Assert-FreshGuestWindow -Session $session -LaunchNumber $launchNumber
+        if ($Persistent) {
+            $secondLaunch = Start-Process -FilePath $launcher -PassThru
+            try {
+                if (-not $secondLaunch.WaitForExit(10000) -or $secondLaunch.ExitCode -ne 0) { throw 'Reopening the running persistent app did not reuse its existing window.' }
+                Assert-FreshGuestWindow -Session $session -LaunchNumber $launchNumber
+            }
+            finally { if (-not $secondLaunch.HasExited) { $secondLaunch.Kill() }; $secondLaunch.Dispose() }
+            Close-FreshTestSession $session
+            Write-Host ('PASS: Persistent app launch ' + $launchNumber + ' preserves its profile and avoids a second app window.')
+            continue
+        }
         Write-Host ('PASS: Real app-mode launch ' + $launchNumber + ' begins with empty cookies, local storage, and cache.')
         if ($launchNumber -eq 2) {
             Close-FreshTestSession $sessions[0]
@@ -224,10 +355,13 @@ try {
             Write-Host 'PASS: Closing one session removes its profile while the other session stays open.'
         }
     }
-    Close-FreshTestSession $sessions[1]
-    Close-FreshTestSession $sessions[2]
-    if ([IO.Directory]::GetDirectories((Join-Path $testRoot 'Sessions')).Length -ne 0) { throw 'Temporary profiles remain after normal window closure.' }
-    Write-Host 'PASS: Real Edge fresh-session isolation, independent closure, clean relaunch, and profile removal.'
+    if ($Persistent) { Write-Host 'PASS: Real persistent app profile, cookies, storage, cache, single-window relaunch, and stable website taskbar identity.' }
+    else {
+        Close-FreshTestSession $sessions[1]
+        Close-FreshTestSession $sessions[2]
+        if ([IO.Directory]::GetDirectories((Join-Path $testRoot 'Sessions')).Length -ne 0) { throw 'Temporary profiles remain after normal window closure.' }
+        Write-Host 'PASS: Real Edge fresh-session isolation, independent closure, clean relaunch, and profile removal.'
+    }
 }
 finally {
     foreach ($session in $sessions) {
