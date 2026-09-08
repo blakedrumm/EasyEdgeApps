@@ -42,15 +42,43 @@ function New-ToolTestContext {
     return [pscustomobject]@{ Root = (Join-Path $testRoot "$Label\Data"); Desktop = (Join-Path $testRoot "$Label\Desktop"); Programs = (Join-Path $testRoot "$Label\Programs") }
 }
 
+function Assert-ToolTextKeys {
+    param($Control)
+    foreach ($child in $Control.Controls) {
+        if ($child -is [Windows.Forms.TextBox]) {
+            $originalText = $child.Text
+            $originalStart = $child.SelectionStart
+            $originalLength = $child.SelectionLength
+            $originalMask = $child.UseSystemPasswordChar
+            try {
+                $child.Text = 'First second'
+                $child.Select($child.TextLength, 0)
+                $keyEvent = New-Object Windows.Forms.KeyEventArgs([Windows.Forms.Keys]::Control -bor [Windows.Forms.Keys]::Back)
+                $onKeyDown = [Windows.Forms.Control].GetMethod('OnKeyDown', [Reflection.BindingFlags]'Instance, NonPublic')
+                [void]$onKeyDown.Invoke($child, [object[]]@($keyEvent.PSObject.BaseObject))
+                $expected = if ($child.ReadOnly) { 'First second' } else { 'First ' }
+                Assert-ToolGui ($keyEvent.SuppressKeyPress -and $child.Text -ceq $expected -and $child.UseSystemPasswordChar -eq $originalMask) 'Dialog textboxes must handle Ctrl+Backspace without inserting control characters, editing read-only details, or changing password masking.'
+            }
+            finally {
+                $child.Text = $originalText
+                $child.Select($originalStart, $originalLength)
+            }
+        }
+        elseif ($child -isnot [Windows.Forms.DataGridView]) { Assert-ToolTextKeys $child }
+    }
+}
+
 function Show-ToolTestForm {
     param($Form)
     $forms.Add($Form)
+    Assert-ToolGui ((-not [Windows.Forms.VisualStyles.VisualStyleInformation]::IsEnabledByUser) -or [Windows.Forms.Application]::RenderWithVisualStyles) 'Dialogs must enable Windows visual styles when the active theme supports them.'
     Assert-ToolGui ($null -ne $Form.Icon -and $Form.Icon.Width -eq 64) 'Every application dialog must use the embedded logo icon.'
     $Form.StartPosition = [Windows.Forms.FormStartPosition]::Manual
     $Form.Location = New-Object Drawing.Point(-10000, -10000)
     $Form.ShowInTaskbar = $false
     $Form.Show()
     [Windows.Forms.Application]::DoEvents()
+    Assert-ToolTextKeys $Form
 }
 
 function Assert-ToolControlLayout {
@@ -63,9 +91,14 @@ function Assert-ToolControlLayout {
             Assert-ToolGui ($child.Right -le $Control.ClientSize.Width + 2 -and $child.Bottom -le $Control.ClientSize.Height + 2) ('Clipped control: ' + $detail)
         }
         if ($child -is [Windows.Forms.Button]) {
+            Assert-ToolGui ($null -ne $child.Image -and $child.Image.Width -ge 16) ('Missing dialog command icon: ' + $child.Text)
             $textSize = [Windows.Forms.TextRenderer]::MeasureText($child.Text.Replace('&', ''), $child.Font)
-            Assert-ToolGui ($textSize.Width -le $child.ClientSize.Width) ('Clipped button label: ' + $child.Text)
+            Assert-ToolGui ($textSize.Width + $child.Image.Width + $child.Padding.Horizontal -le $child.ClientSize.Width) ('Clipped button icon or label: ' + $child.Text)
         }
+        if ($child -is [Windows.Forms.Label] -and $child.Text -cne 'Easy Edge Apps') {
+            Assert-ToolGui ($child.Tag -is [Drawing.Image] -and $child.Padding.Left -gt $child.Tag.Width -and $child.Height -ge $child.Tag.Height) ('Label icon overlaps its text area: ' + $child.Text)
+        }
+        if ($child -is [Windows.Forms.CheckBox]) { Assert-ToolGui ($null -ne $child.Image) ('Missing dialog selection icon: ' + $child.Text) }
         if ($child -isnot [Windows.Forms.DataGridView]) { Assert-ToolControlLayout $child }
     }
 }
@@ -94,6 +127,10 @@ function Test-ToolFormLayout {
         }
         if ($ScreenshotDirectory) {
             [void][IO.Directory]::CreateDirectory($ScreenshotDirectory)
+            if ($null -ne $Form.Tag.PSObject.Properties['EditorViewport']) {
+                $Form.Tag.EditorViewport.AutoScrollPosition = New-Object Drawing.Point(0, 0)
+                [Windows.Forms.Application]::DoEvents()
+            }
             $bitmap = New-Object Drawing.Bitmap($Form.Width, $Form.Height)
             try {
                 $Form.DrawToBitmap($bitmap, (New-Object Drawing.Rectangle(0, 0, $bitmap.Width, $bitmap.Height)))
@@ -142,7 +179,7 @@ try {
     $exportUi.ApplyButton.PerformClick()
     Assert-ToolGui ([IO.File]::Exists($script:KitFileChoice)) ('Approved protected export failed: ' + $exportUi.StatusLabel.Text)
     $envelope = Read-EeaKitDocument $script:KitFileChoice
-    Write-Host 'PASS: Masked export passwords, mismatch, file cancellation, readable-file consent, and standard/encrypted exports.'
+    Write-Host 'PASS: Dialog Ctrl+Backspace, masked export passwords, mismatch, file cancellation, readable-file consent, and standard/encrypted exports.'
 
     $unlockForm = New-EeaPasswordForm -Envelope $envelope
     Show-ToolTestForm $unlockForm

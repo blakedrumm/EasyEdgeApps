@@ -26,10 +26,15 @@ Assert-Json ($null -eq $value.Items[0] -and $value.Items[1] -is [bool] -and $val
 Assert-Json ($value.'space key' -ceq 'value' -and $null -ne $value.PSObject.Properties['PSTypeName']) 'Field names must remain data, including PowerShell-looking names.'
 $punctuation = ConvertFrom-EeaJson '{"Notes":"literal ,} and ,] stay readable","Escaped":"quote: \",}"}'
 Assert-Json ($punctuation.Notes -ceq 'literal ,} and ,] stay readable' -and $punctuation.Escaped -ceq 'quote: ",}') 'Syntax checks must not interpret punctuation inside JSON strings.'
+$numbers = ConvertFrom-EeaJson '{"Zero":-0,"Fraction":0.5,"Negative":-12,"Exponent":1e+2,"Small":1E-2}'
+Assert-Json ($numbers.Zero -eq 0 -and $numbers.Fraction -eq 0.5 -and $numbers.Negative -eq -12 -and $numbers.Exponent -eq 100 -and $numbers.Small -eq 0.01) 'Accept the standard JSON integer, fraction, and exponent forms.'
 $literal = "First`r`nSecond`t" + [char]0xe9 + ' <>&' + [char]0x1f
 $encoded = [pscustomobject]@{ Notes = $literal } | ConvertTo-Json -Compress
 Assert-Json ((ConvertFrom-EeaJson $encoded).Notes -ceq $literal) 'The standard parser must preserve escaped Unicode and control characters for later domain validation.'
 foreach ($invalid in @('{"Name":"one","Name":"two"}', '{"Name":"one","name":"two"}', '{"__type":"Untrusted:#Type","Name":"one"}', '{"Name":true,}', '{/*comment*/"Name":"one"}', '{"Name":NaN}', '{"Name":1} {"Name":2}', '{"Name":"unfinished}', '[')) {
+    Assert-JsonRejected { ConvertFrom-EeaJson $invalid }
+}
+foreach ($invalid in @('{"Value":01}', '{"Value":-01}', '{"Value":1.}', '{"Value":1.e2}', '{"Value":.5}', '{"Value":+1}', '{"Value":0x10}', '{"Name":"one","\u004eame":"two"}', '{"Name":"one","\u006eame":"two"}', '{"PSObject":{"Properties":[]},"Name":"one"}', '{"PSBase":null,"Name":"one"}')) {
     Assert-JsonRejected { ConvertFrom-EeaJson $invalid }
 }
 Assert-JsonRejected { ConvertFrom-EeaJson (('[' * 40) + '0' + (']' * 40)) }

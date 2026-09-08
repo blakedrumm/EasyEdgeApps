@@ -6,21 +6,45 @@ Creates easy-to-find, per-user Microsoft Edge website shortcuts on Windows 11.
 .DESCRIPTION
 Run without parameters for the setup window. Command-line actions also support
 App Kits, Check, Repair, ListFavorites, and ImportFavorites.
-No administrator rights, external modules, downloads,
+No administrator rights, external modules, dependency downloads,
 browser policy changes, or persistent execution-policy changes are required.
+Setup can retrieve a website icon over HTTPS when explicitly requested.
+.PARAMETER Help
+Display command-line help without opening setup or performing an operation.
+Accepts -Help, -h, and --help. PowerShell also provides the native -? help option.
+.PARAMETER Unattended
+Explicitly approve the selected command-line operation without setup dialogs or
+confirmation prompts. Retains validation, ownership checks, and WhatIf. Routine
+host messages are suppressed; results remain PowerShell objects. Success exits
+with code 0, and errors, conflicts, or failed applications exit with code 1.
+.PARAMETER AppNames
+Select named apps for export, kit import, repair, or Favorites import. An explicit
+empty selection is rejected. Omit this option to export all saved apps or import
+all apps in a kit; repair still requires a selection.
+.PARAMETER Quiet
+Suppress routine messages and formatted previews, retaining result objects,
+errors, warnings, and WhatIf output. Does not approve changes by itself.
 .EXAMPLE
 .\EasyEdgeApps.ps1
+.EXAMPLE
+.\EasyEdgeApps.ps1 --help
 .EXAMPLE
 .\EasyEdgeApps.ps1 -Action Install -Name 'My Mail' -Url 'https://outlook.live.com/mail/'
 .EXAMPLE
 .\EasyEdgeApps.ps1 -Action Remove -Name 'My Mail' -WhatIf
+.EXAMPLE
+.\EasyEdgeApps.ps1 -Action ExportKit -Path '.\Family.eeakit.json' -Unattended
+.EXAMPLE
+.\EasyEdgeApps.ps1 -Action ImportKit -Path '.\Family.eeakit.json' -AppNames 'My Mail' -Unattended
+.NOTES
+Version: 1.2.0
 .LINK
 https://github.com/blakedrumm/EasyEdgeApps
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
-    [ValidateSet('Setup', 'Install', 'List', 'Remove', 'Open', 'ExportKit', 'ImportKit', 'Check', 'Repair', 'ListFavorites', 'ImportFavorites')]
+    [ValidateSet('Setup', 'Install', 'List', 'Remove', 'Open', 'ExportKit', 'ImportKit', 'Check', 'Repair', 'ListFavorites', 'ImportFavorites', '--help')]
     [string]$Action = 'Setup',
     [string]$Name,
     [string]$Url,
@@ -28,6 +52,7 @@ param(
     [string]$Notes,
     [string]$Path,
     [string]$KitName = 'My websites',
+    [ValidateNotNullOrEmpty()]
     [string[]]$AppNames,
     [string]$EdgeProfile,
     [string]$EdgeUserDataPath = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'),
@@ -39,7 +64,10 @@ param(
     [switch]$NoDesktop,
     [switch]$NoStartMenu,
     [switch]$Launch,
-    [switch]$Quiet
+    [switch]$Unattended,
+    [switch]$Quiet,
+    [Alias('h', '-help')]
+    [switch]$Help
 )
 
 function ConvertFrom-EeaJsonElement {
@@ -71,6 +99,7 @@ function ConvertFrom-EeaJsonElement {
             throw 'Invalid JSON Boolean.'
         }
         'number' {
+            if ($Element.InnerText -cnotmatch '\A-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\z') { throw 'Invalid JSON number.' }
             $integer = 0L
             if ([long]::TryParse($Element.InnerText, [Globalization.NumberStyles]::AllowLeadingSign, [Globalization.CultureInfo]::InvariantCulture, [ref]$integer)) {
                 if ($integer -ge [int]::MinValue -and $integer -le [int]::MaxValue) { return [int]$integer }
@@ -489,7 +518,11 @@ function Get-EeaEdgeFavorites {
             }
             $title = [regex]::Replace($title, '[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', ' ')
             if ($title.Length -gt 256) { $title = $title.Substring(0, 256) }
-            if (-not $canImport) { $appName = $title; if ($website.Length -gt 2048) { $website = $website.Substring(0, 2048) } }
+            if (-not $canImport) {
+                $appName = $title
+                if ($website.Length -gt 2048) { $website = $website.Substring(0, 2048) }
+                $website = [regex]::Replace($website, '[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', ' ')
+            }
             $entries.Add([pscustomobject]@{
                 Title = $title; Name = $appName; Url = $website; Folder = $current.Folder
                 ProfileDirectory = $ProfileDirectory; CanImport = $canImport; Status = $reason
@@ -718,7 +751,7 @@ function New-EeaIcon {
 
 function Assert-EeaIconData {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes, [switch]$StructureOnly)
 
     if ($Bytes.Length -lt 22 -or $Bytes.Length -gt 1MB -or
         [BitConverter]::ToUInt16($Bytes, 0) -ne 0 -or [BitConverter]::ToUInt16($Bytes, 2) -ne 1) {
@@ -745,6 +778,7 @@ function Assert-EeaIconData {
             [BitConverter]::ToInt32($Bytes, $imageOffset + 4) -ne $width -or
             [BitConverter]::ToInt32($Bytes, $imageOffset + 8) -ne 2 * $height) { throw 'Invalid bitmap icon dimensions.' }
     }
+    if ($StructureOnly) { return }
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
     $stream = New-Object IO.MemoryStream(,$Bytes)
     $icon = $null
@@ -786,6 +820,312 @@ function Read-EeaCustomIcon {
     finally {
         $iconStream.Dispose()
     }
+}
+
+function ConvertTo-EeaWebsiteIcon {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+
+    if ($Bytes.Length -lt 24 -or $Bytes.Length -gt 1MB) { throw 'The website icon must be an ICO or PNG image no larger than 1 MB.' }
+    $imageBytes = $Bytes
+    if ([BitConverter]::ToUInt32($Bytes, 0) -eq 65536) {
+        Assert-EeaIconData $Bytes -StructureOnly
+        $bestEntry = 6
+        $bestArea = 0
+        for ($entry = 6; $entry -lt 6 + 16 * [BitConverter]::ToUInt16($Bytes, 4); $entry += 16) {
+            $width = if ($Bytes[$entry] -eq 0) { 256 } else { [int]$Bytes[$entry] }
+            $height = if ($Bytes[$entry + 1] -eq 0) { 256 } else { [int]$Bytes[$entry + 1] }
+            if ($width * $height -gt $bestArea) { $bestEntry = $entry; $bestArea = $width * $height }
+        }
+        $imageOffset = [int][BitConverter]::ToUInt32($Bytes, $bestEntry + 12)
+        $imageLength = [int][BitConverter]::ToUInt32($Bytes, $bestEntry + 8)
+        if ([BitConverter]::ToString($Bytes, $imageOffset, 8) -ceq '89-50-4E-47-0D-0A-1A-0A') {
+            $imageBytes = New-Object byte[] $imageLength
+            [Array]::Copy($Bytes, $imageOffset, $imageBytes, 0, $imageLength)
+        }
+        else {
+            $imageBytes = New-Object byte[] (22 + $imageLength)
+            [Array]::Copy($Bytes, 0, $imageBytes, 0, 6)
+            $imageBytes[4] = 1
+            $imageBytes[5] = 0
+            [Array]::Copy($Bytes, $bestEntry, $imageBytes, 6, 16)
+            [Array]::Copy([BitConverter]::GetBytes([uint32]22), 0, $imageBytes, 18, 4)
+            [Array]::Copy($Bytes, $imageOffset, $imageBytes, 22, $imageLength)
+        }
+    }
+    $isPng = [BitConverter]::ToString($imageBytes, 0, 8) -ceq '89-50-4E-47-0D-0A-1A-0A'
+    if ($isPng) {
+        if ([BitConverter]::ToString($imageBytes, 8, 8) -cne '00-00-00-0D-49-48-44-52') { throw 'Invalid website PNG header.' }
+        foreach ($dimensionOffset in @(16, 20)) {
+            $dimension = [byte[]]$imageBytes[$dimensionOffset..($dimensionOffset + 3)]
+            if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($dimension) }
+            $length = [BitConverter]::ToUInt32($dimension, 0)
+            if ($length -lt 1 -or $length -gt 1024) { throw 'Website icon dimensions must be between 1 and 1024 pixels.' }
+        }
+    }
+    else { Assert-EeaIconData $imageBytes }
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    $inputStream = New-Object IO.MemoryStream(,$imageBytes)
+    $outputStream = New-Object IO.MemoryStream
+    $image = $null
+    $icon = $null
+    $bitmap = $null
+    $graphics = $null
+    $writer = $null
+    try {
+        if ($isPng) { $image = [Drawing.Image]::FromStream($inputStream, $false, $true) }
+        else { $icon = New-Object Drawing.Icon($inputStream); $image = $icon.ToBitmap() }
+        $bitmap = New-Object Drawing.Bitmap(128, 128, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        $graphics.Clear([Drawing.Color]::Transparent)
+        $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $scale = [Math]::Min(128.0 / $image.Width, 128.0 / $image.Height)
+        $width = [Math]::Max(1, [int]($image.Width * $scale))
+        $height = [Math]::Max(1, [int]($image.Height * $scale))
+        $graphics.DrawImage($image, (New-Object Drawing.Rectangle(([int]((128 - $width) / 2)), ([int]((128 - $height) / 2)), $width, $height)))
+        $graphics.Flush()
+        $pixelBytes = New-Object byte[] (128 * 128 * 4)
+        $maskBytes = New-Object byte[] (16 * 128)
+        $data = $bitmap.LockBits((New-Object Drawing.Rectangle(0, 0, 128, 128)), [Drawing.Imaging.ImageLockMode]::ReadOnly, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        try {
+            for ($row = 0; $row -lt 128; $row++) {
+                [Runtime.InteropServices.Marshal]::Copy([IntPtr]::Add($data.Scan0, $row * $data.Stride), $pixelBytes, (127 - $row) * 512, 512)
+            }
+        }
+        finally { $bitmap.UnlockBits($data) }
+        for ($pixel = 0; $pixel -lt 128 * 128; $pixel++) {
+            if ($pixelBytes[$pixel * 4 + 3] -eq 0) {
+                $maskOffset = [int][Math]::Floor($pixel / 8.0)
+                $maskBytes[$maskOffset] = $maskBytes[$maskOffset] -bor (128 -shr ($pixel % 8))
+            }
+        }
+        $writer = New-Object IO.BinaryWriter($outputStream)
+        foreach ($value in @(0, 1, 1)) { $writer.Write([uint16]$value) }
+        foreach ($value in @(128, 128, 0, 0)) { $writer.Write([byte]$value) }
+        $writer.Write([uint16]1)
+        $writer.Write([uint16]32)
+        $writer.Write([uint32](40 + $pixelBytes.Length + $maskBytes.Length))
+        $writer.Write([uint32]22)
+        $writer.Write([uint32]40)
+        $writer.Write([int32]128)
+        $writer.Write([int32]256)
+        $writer.Write([uint16]1)
+        $writer.Write([uint16]32)
+        $writer.Write([uint32]0)
+        $writer.Write([uint32]($pixelBytes.Length + $maskBytes.Length))
+        foreach ($value in @(0, 0, 0, 0)) { $writer.Write([uint32]$value) }
+        $writer.Write($pixelBytes)
+        $writer.Write($maskBytes)
+        $writer.Flush()
+        $result = $outputStream.ToArray()
+        Assert-EeaIconData $result
+        return ,$result
+    }
+    finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        if ($null -ne $graphics) { $graphics.Dispose() }
+        if ($null -ne $bitmap) { $bitmap.Dispose() }
+        if ($null -ne $image) { $image.Dispose() }
+        if ($null -ne $icon) { $icon.Dispose() }
+        $inputStream.Dispose()
+        $outputStream.Dispose()
+    }
+}
+
+function Get-EeaWebsiteIconCandidates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][uri]$PageUri, [AllowEmptyString()][string]$Html = '')
+
+    $pageAddress = [uri](ConvertTo-EeaWebsite $PageUri.AbsoluteUri)
+    if ($Html.Length -gt 512KB) { throw 'The website page exceeds the icon lookup limit.' }
+    $tagPattern = '<!--.*?(?:-->|$)|<(script|style|textarea|title)\b[^>]*>.*?(?:</\1\s*>|$)|<(?<kind>base|link)\b(?<attributes>(?:"[^"]*"|''[^'']*''|[^''">])*)>'
+    $attributePattern = '(?:^|\s+)(?<name>[^\s"''<>/=]+)(?:\s*=\s*(?:"(?<value>[^"]*)"|''(?<value>[^'']*)''|(?<value>[^\s"''=<>`]+)))?'
+    $options = [Text.RegularExpressions.RegexOptions]'IgnoreCase, Singleline, CultureInvariant'
+    $timeout = [TimeSpan]::FromMilliseconds(250)
+    $tag = [regex]::Match($Html, $tagPattern, $options, $timeout)
+    $links = New-Object 'Collections.Generic.List[string]'
+    $baseAddress = $pageAddress
+    $baseFound = $false
+    $tagCount = 0
+    while ($tag.Success -and $tagCount -lt 128) {
+        $tagCount++
+        if ($tag.Groups['kind'].Success) {
+            $attributes = @{}
+            foreach ($attribute in [regex]::Matches($tag.Groups['attributes'].Value, $attributePattern, $options, $timeout)) {
+                $key = $attribute.Groups['name'].Value
+                if (-not $attributes.ContainsKey($key)) { $attributes[$key] = [Net.WebUtility]::HtmlDecode($attribute.Groups['value'].Value) }
+            }
+            if ($attributes.ContainsKey('href')) {
+                $href = $attributes['href'].Trim()
+                if ($tag.Groups['kind'].Value -ieq 'base' -and -not $baseFound) {
+                    $baseFound = $true
+                    try { $baseAddress = [uri](ConvertTo-EeaWebsite (New-Object Uri($pageAddress, $href)).AbsoluteUri) }
+                    catch { $baseAddress = $pageAddress }
+                }
+                elseif ($tag.Groups['kind'].Value -ieq 'link' -and $attributes.ContainsKey('rel')) {
+                    $relations = $attributes['rel'] -split '\s+'
+                    if (($relations -contains 'icon' -or $relations -contains 'apple-touch-icon' -or $relations -contains 'apple-touch-icon-precomposed') -and
+                        $attributes['type'] -ine 'image/svg+xml' -and $href -notmatch '[\p{Cc}\p{Cf}\\]') {
+                        $links.Add($href)
+                    }
+                }
+            }
+        }
+        $tag = $tag.NextMatch()
+    }
+    $seen = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $candidates = New-Object 'Collections.Generic.List[string]'
+    foreach ($href in $links) {
+        try {
+            $address = [uri](ConvertTo-EeaWebsite (New-Object Uri($baseAddress, $href)).AbsoluteUri)
+            if ($address.AbsolutePath -match '\.(svg|gif|jpe?g|webp)$') { continue }
+            if ($seen.Add($address.AbsoluteUri)) { $candidates.Add($address.AbsoluteUri) }
+            if ($candidates.Count -ge 5) { break }
+        }
+        catch { continue }
+    }
+    $fallback = (New-Object Uri($pageAddress, '/favicon.ico')).AbsoluteUri
+    if ($seen.Add($fallback)) { $candidates.Add($fallback) }
+    return $candidates.ToArray()
+}
+
+function Get-EeaWebsiteResponse {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Client,
+        [Parameter(Mandatory = $true)][string]$Website,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 1048576)][int]$MaximumBytes,
+        [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None
+    )
+
+    $address = [uri](ConvertTo-EeaWebsite $Website)
+    $requestCancellation = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($CancellationToken, [Threading.CancellationToken]::None)
+    $requestCancellation.CancelAfter(8000)
+    try {
+        for ($redirect = 0; $redirect -le 3; $redirect++) {
+            $requestCancellation.Token.ThrowIfCancellationRequested()
+            $request = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Get, $address)
+            $response = $null
+            $stream = $null
+            $buffer = New-Object IO.MemoryStream
+            try {
+                $response = $Client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $requestCancellation.Token).GetAwaiter().GetResult()
+                if ([int]$response.StatusCode -in @(301, 302, 303, 307, 308)) {
+                    if ($redirect -eq 3 -or $null -eq $response.Headers.Location) { throw 'Too many website redirects or a missing redirect address.' }
+                    $address = [uri](ConvertTo-EeaWebsite (New-Object Uri($address, $response.Headers.Location)).AbsoluteUri)
+                    continue
+                }
+                $null = $response.EnsureSuccessStatusCode()
+                if ($null -ne $response.Content.Headers.ContentLength -and $response.Content.Headers.ContentLength -gt $MaximumBytes) { throw 'The website response exceeds the icon lookup size limit.' }
+                $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                $chunk = New-Object byte[] 8192
+                while ($true) {
+                    $requestCancellation.Token.ThrowIfCancellationRequested()
+                    $count = $stream.ReadAsync($chunk, 0, $chunk.Length, $requestCancellation.Token).GetAwaiter().GetResult()
+                    if ($count -eq 0) { break }
+                    if ($buffer.Length + $count -gt $MaximumBytes) { throw 'The website response exceeds the icon lookup size limit.' }
+                    $buffer.Write($chunk, 0, $count)
+                }
+                $mediaType = ''
+                $characterSet = ''
+                if ($null -ne $response.Content.Headers.ContentType) {
+                    $mediaType = $response.Content.Headers.ContentType.MediaType
+                    $characterSet = $response.Content.Headers.ContentType.CharSet
+                }
+                return [pscustomobject]@{ Uri = $address; Bytes = $buffer.ToArray(); MediaType = $mediaType; CharacterSet = $characterSet }
+            }
+            finally {
+                $buffer.Dispose()
+                if ($null -ne $stream) { $stream.Dispose() }
+                if ($null -ne $response) { $response.Dispose() }
+                $request.Dispose()
+            }
+        }
+    }
+    finally { $requestCancellation.Dispose() }
+}
+
+function Get-EeaWebsiteIcon {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Website,
+        [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None,
+        $Client
+    )
+
+    $pageAddress = [uri](ConvertTo-EeaWebsite $Website)
+    Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+    $ownsClient = $null -eq $Client
+    if ($ownsClient) {
+        $handler = New-Object Net.Http.HttpClientHandler
+        $handler.AllowAutoRedirect = $false
+        $handler.UseCookies = $false
+        $handler.UseDefaultCredentials = $false
+        $handler.Credentials = $null
+        $handler.Proxy = [Net.WebRequest]::GetSystemWebProxy()
+        $handler.Proxy.Credentials = $null
+        $handler.SslProtocols = [Security.Authentication.SslProtocols]::Tls12
+        $handler.AutomaticDecompression = [Net.DecompressionMethods]'GZip, Deflate'
+        $handler.MaxResponseHeadersLength = 32
+        $Client = New-Object Net.Http.HttpClient($handler)
+        $Client.Timeout = [TimeSpan]::FromMilliseconds(-1)
+        $Client.DefaultRequestHeaders.UserAgent.ParseAdd('EasyEdgeApps')
+    }
+    $lookupCancellation = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($CancellationToken, [Threading.CancellationToken]::None)
+    $lookupCancellation.CancelAfter(20000)
+    try {
+        $candidates = @(Get-EeaWebsiteIconCandidates -PageUri $pageAddress)
+        try {
+            $page = Get-EeaWebsiteResponse -Client $Client -Website $pageAddress.AbsoluteUri -MaximumBytes 512KB -CancellationToken $lookupCancellation.Token
+            $encoding = [Text.Encoding]::UTF8
+            if ($page.CharacterSet) {
+                try { $encoding = [Text.Encoding]::GetEncoding($page.CharacterSet.Trim('"')) }
+                catch { $encoding = [Text.Encoding]::UTF8 }
+            }
+            if (-not $page.MediaType -or $page.MediaType -in @('text/html', 'application/xhtml+xml')) {
+                $candidates = @(Get-EeaWebsiteIconCandidates -PageUri $page.Uri -Html $encoding.GetString($page.Bytes))
+            }
+        }
+        catch { if ($lookupCancellation.IsCancellationRequested) { throw } }
+        foreach ($candidate in $candidates) {
+            try {
+                $download = Get-EeaWebsiteResponse -Client $Client -Website $candidate -MaximumBytes 1MB -CancellationToken $lookupCancellation.Token
+                $iconData = ConvertTo-EeaWebsiteIcon $download.Bytes
+                return [pscustomobject]@{ Bytes = $iconData; SourceUrl = $download.Uri.AbsoluteUri }
+            }
+            catch { if ($lookupCancellation.IsCancellationRequested) { throw } }
+        }
+        throw 'No usable ICO or PNG website icon was found. Your current icon has not changed.'
+    }
+    catch {
+        if ($CancellationToken.IsCancellationRequested) { throw (New-Object OperationCanceledException('Website icon lookup cancelled.')) }
+        if ($lookupCancellation.IsCancellationRequested) { throw 'Website icon lookup timed out. Your current icon has not changed.' }
+        throw
+    }
+    finally {
+        $lookupCancellation.Dispose()
+        if ($ownsClient) { $Client.Dispose() }
+    }
+}
+
+function Start-EeaWebsiteIconRequest {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Website, $Client)
+
+    $address = ConvertTo-EeaWebsite $Website
+    $cancellation = New-Object Threading.CancellationTokenSource
+    $pipeline = [PowerShell]::Create()
+    try {
+        $definitions = foreach ($functionName in @('ConvertTo-EeaWebsite', 'Assert-EeaIconData', 'ConvertTo-EeaWebsiteIcon', 'Get-EeaWebsiteIconCandidates', 'Get-EeaWebsiteResponse', 'Get-EeaWebsiteIcon')) {
+            'function ' + $functionName + " {`n" + (Get-Command $functionName -CommandType Function).Definition + "`n}"
+        }
+        $bootstrap = '$ErrorActionPreference = ''Stop''' + "`n" + ($definitions -join "`n") + "`n" + 'Get-EeaWebsiteIcon -Website $args[0] -CancellationToken $args[1] -Client $args[2]'
+        [void]$pipeline.AddScript($bootstrap).AddArgument($address).AddArgument($cancellation.Token).AddArgument($Client)
+        $pending = $pipeline.BeginInvoke()
+        return [pscustomobject]@{ Website = $address; PowerShell = $pipeline; AsyncResult = $pending; Cancellation = $cancellation; Discard = $false }
+    }
+    catch { $pipeline.Dispose(); $cancellation.Dispose(); throw }
 }
 
 function Write-EeaAtomicFile {
@@ -1719,34 +2059,916 @@ function Set-EeaFormIcon {
 }
 
 function Get-EeaIconPreview {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Path)
+    [CmdletBinding(DefaultParameterSetName = 'File')]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'File')][string]$Path,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Data')][byte[]]$IconData
+    )
 
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
-    $icon = New-Object Drawing.Icon($Path)
-    $bitmap = New-Object Drawing.Bitmap(96, 96)
-    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    if ($PSCmdlet.ParameterSetName -eq 'File') { $IconData = Read-EeaCustomIcon $Path }
+    else { Assert-EeaIconData $IconData }
+    $stream = New-Object IO.MemoryStream(,$IconData)
+    $icon = $null
+    $bitmap = $null
+    $graphics = $null
     try {
+        $icon = New-Object Drawing.Icon($stream)
+        $bitmap = New-Object Drawing.Bitmap(96, 96)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
         $graphics.Clear([Drawing.Color]::Transparent)
         $graphics.DrawIcon($icon, (New-Object Drawing.Rectangle(0, 0, 96, 96)))
         return $bitmap
     }
-    catch { $bitmap.Dispose(); throw }
-    finally { $graphics.Dispose(); $icon.Dispose() }
+    catch { if ($null -ne $bitmap) { $bitmap.Dispose() }; throw }
+    finally {
+        if ($null -ne $graphics) { $graphics.Dispose() }
+        if ($null -ne $icon) { $icon.Dispose() }
+        $stream.Dispose()
+    }
+}
+
+function Initialize-EeaSpaceBackground {
+    [CmdletBinding()]
+    param()
+
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    $references = @([Drawing.Bitmap].Assembly.Location, [Drawing.PointF].Assembly.Location, [Windows.Forms.Form].Assembly.Location) | Select-Object -Unique
+    foreach ($assemblyName in @('System.Private.Windows.Core.dll', 'System.Private.Windows.GdiPlus.dll', 'System.Windows.Forms.Primitives.dll', 'System.ComponentModel.Primitives.dll', 'System.ComponentModel.TypeConverter.dll', 'System.ObjectModel.dll', 'System.Drawing.dll')) {
+        $assemblyPath = Join-Path $PSHOME $assemblyName
+        if (Test-Path -LiteralPath $assemblyPath -PathType Leaf) { $references += $assemblyPath }
+    }
+    $typeSource = @'
+using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace EasyEdgeApps
+{
+    public sealed class StarfieldRenderer : IDisposable
+    {
+        private struct Star
+        {
+            public float Horizontal, Vertical, Depth, Phase, Flux;
+            public int Tone, Kernel;
+            public bool Galaxy;
+        }
+
+        private readonly Star[] stars = new Star[3880];
+        private readonly Color[] tones = { Color.FromArgb(226, 239, 255), Color.FromArgb(107, 183, 239), Color.FromArgb(255, 196, 143) };
+        private readonly int[] kernelSizes = { 3, 7, 13, 25, 41 };
+        private readonly float[][] kernels = new float[5][];
+        private Bitmap image;
+        private int[] background, pixels;
+        private int width, height;
+        private bool disposed;
+
+        public StarfieldRenderer()
+        {
+            Random random = new Random(67129);
+            for (int kernel = 0; kernel < kernels.Length; kernel++) kernels[kernel] = CreateKernel(kernelSizes[kernel], kernel);
+            for (int index = 0; index < stars.Length; index++)
+            {
+                double brightness = random.NextDouble();
+                Star star = new Star {
+                    Depth = (float)random.NextDouble(), Phase = (float)(random.NextDouble() * Math.PI * 2),
+                    Tone = random.Next(10) < 6 ? 0 : random.Next(1, 3),
+                    Kernel = brightness > 0.994 ? 4 : brightness > 0.97 ? 3 : brightness > 0.86 ? 2 : brightness > 0.52 ? 1 : 0,
+                    Flux = (float)(40 + brightness * 180), Galaxy = index < 3600
+                };
+                if (index < 3000)
+                {
+                    double radius = 0.07 + Math.Pow(random.NextDouble(), 0.73) * 0.9;
+                    double scattering = Gaussian(random);
+                    star.Horizontal = (float)(radius + Gaussian(random) * (0.006 + radius * 0.018));
+                    star.Vertical = (float)((index % 3) * Math.PI * 2 / 3 + radius * 5.6 + scattering * (0.055 + radius * 0.12));
+                    if (index % 9 == 0) { star.Vertical += (float)(Gaussian(random) * 0.48); star.Flux *= 0.48f; }
+                }
+                else if (index < 3600)
+                {
+                    star.Horizontal = (float)(Math.Pow(random.NextDouble(), 1.55) * 0.155);
+                    star.Vertical = (float)(random.NextDouble() * Math.PI * 2);
+                    star.Flux *= 0.8f;
+                    star.Tone = 0;
+                    star.Kernel = Math.Min(2, star.Kernel);
+                }
+                else
+                {
+                    star.Horizontal = (float)random.NextDouble();
+                    star.Vertical = (float)random.NextDouble();
+                    star.Flux *= 0.72f;
+                }
+                stars[index] = star;
+            }
+        }
+
+        private static double Gaussian(Random random)
+        {
+            return Math.Sqrt(-2 * Math.Log(Math.Max(0.00001, random.NextDouble()))) * Math.Cos(random.NextDouble() * Math.PI * 2);
+        }
+
+        private static float[] CreateKernel(int size, int level)
+        {
+            float[] kernel = new float[size * size];
+            double center = (size - 1) / 2.0;
+            for (int vertical = 0; vertical < size; vertical++)
+            {
+                for (int horizontal = 0; horizontal < size; horizontal++)
+                {
+                    double horizontalDistance = horizontal - center;
+                    double verticalDistance = vertical - center;
+                    double distance = horizontalDistance * horizontalDistance + verticalDistance * verticalDistance;
+                    double core = Math.Exp(-distance / (0.42 + level * 0.24));
+                    double halo = level == 0 ? 0 : Math.Exp(-distance / (size * size * 0.075)) * (0.055 + level * 0.016);
+                    double rays = level < 3 ? 0 : (Math.Exp(-horizontalDistance * horizontalDistance * 3.5) + Math.Exp(-verticalDistance * verticalDistance * 3.5)) * Math.Exp(-Math.Sqrt(distance) / (size * 0.16)) * 0.07;
+                    kernel[vertical * size + horizontal] = (float)(core + halo + rays);
+                }
+            }
+            return kernel;
+        }
+
+        private void EnsureViewport(Size viewport)
+        {
+            if (image != null && image.Size == viewport) return;
+            Bitmap replacement = new Bitmap(viewport.Width, viewport.Height, PixelFormat.Format32bppPArgb);
+            if (image != null) image.Dispose();
+            image = replacement;
+            width = viewport.Width;
+            height = viewport.Height;
+            pixels = new int[checked(width * height)];
+            background = new int[pixels.Length];
+            double scale = Math.Min(width * 0.47, height * 0.76);
+            for (int vertical = 0; vertical < height; vertical++)
+            {
+                for (int horizontal = 0; horizontal < width; horizontal++)
+                {
+                    double horizontalDistance = (horizontal - width * 0.58) / scale;
+                    double verticalDistance = (vertical - height * 0.52) / scale;
+                    double radius = horizontalDistance * horizontalDistance + verticalDistance * verticalDistance * 1.6;
+                    double starlight = Math.Exp(-radius * 19) * 11 + Math.Exp(-radius * 210) * 17;
+                    int red = 4 + (int)starlight;
+                    int green = 8 + (int)(starlight * 1.04);
+                    int blue = 11 + (int)(starlight * 1.12);
+                    background[vertical * width + horizontal] = unchecked((int)0xff000000) | (red << 16) | (green << 8) | blue;
+                }
+            }
+        }
+
+        private void AddLight(int horizontal, int vertical, float intensity, Color color)
+        {
+            if ((uint)horizontal >= (uint)width || (uint)vertical >= (uint)height || intensity < 0.6f) return;
+            int offset = vertical * width + horizontal;
+            int previous = pixels[offset];
+            int red = Math.Min(255, ((previous >> 16) & 255) + (int)(color.R * intensity / 255));
+            int green = Math.Min(255, ((previous >> 8) & 255) + (int)(color.G * intensity / 255));
+            int blue = Math.Min(255, (previous & 255) + (int)(color.B * intensity / 255));
+            pixels[offset] = unchecked((int)0xff000000) | (red << 16) | (green << 8) | blue;
+        }
+
+        private void DrawStar(float horizontal, float vertical, Star star, float brightness)
+        {
+            int size = kernelSizes[star.Kernel];
+            float[] kernel = kernels[star.Kernel];
+            float left = horizontal - (size - 1) / 2f;
+            float top = vertical - (size - 1) / 2f;
+            int originHorizontal = (int)Math.Floor(left);
+            int originVertical = (int)Math.Floor(top);
+            float fractionHorizontal = left - originHorizontal;
+            float fractionVertical = top - originVertical;
+            float topLeft = (1 - fractionHorizontal) * (1 - fractionVertical);
+            float topRight = fractionHorizontal * (1 - fractionVertical);
+            float bottomLeft = (1 - fractionHorizontal) * fractionVertical;
+            float bottomRight = fractionHorizontal * fractionVertical;
+            Color tone = tones[star.Tone];
+            for (int row = 0; row < size; row++)
+            {
+                for (int column = 0; column < size; column++)
+                {
+                    float intensity = kernel[row * size + column] * brightness;
+                    if (intensity < 0.6f) continue;
+                    int pixelHorizontal = originHorizontal + column;
+                    int pixelVertical = originVertical + row;
+                    AddLight(pixelHorizontal, pixelVertical, intensity * topLeft, tone);
+                    AddLight(pixelHorizontal + 1, pixelVertical, intensity * topRight, tone);
+                    AddLight(pixelHorizontal, pixelVertical + 1, intensity * bottomLeft, tone);
+                    AddLight(pixelHorizontal + 1, pixelVertical + 1, intensity * bottomRight, tone);
+                }
+            }
+        }
+
+        public void Render(Graphics graphics, Size viewport, double seconds, PointF pointer, float pointerInfluence)
+        {
+            if (disposed) throw new ObjectDisposedException("StarfieldRenderer");
+            if (viewport.Width < 1 || viewport.Height < 1) return;
+            EnsureViewport(viewport);
+            Array.Copy(background, pixels, pixels.Length);
+            float influence = Math.Max(0, Math.Min(1, pointerInfluence));
+            float horizontalShift = (Math.Max(0, Math.Min(1, pointer.X)) - 0.5f) * influence;
+            float verticalShift = (Math.Max(0, Math.Min(1, pointer.Y)) - 0.5f) * influence;
+            float scale = Math.Min(width * 0.47f, height * 0.76f);
+            double tilt = -0.38 + horizontalShift * 0.018;
+            double tiltCosine = Math.Cos(tilt);
+            double tiltSine = Math.Sin(tilt);
+            for (int index = 0; index < stars.Length; index++)
+            {
+                Star star = stars[index];
+                float horizontal, vertical;
+                if (star.Galaxy)
+                {
+                    double angle = star.Vertical + seconds * (0.0018 + star.Depth * 0.00035);
+                    double orbitHorizontal = Math.Cos(angle) * star.Horizontal * scale;
+                    double orbitVertical = Math.Sin(angle) * star.Horizontal * scale * (0.74 + verticalShift * 0.015);
+                    horizontal = width * 0.58f + (float)(orbitHorizontal * tiltCosine - orbitVertical * tiltSine);
+                    vertical = height * 0.52f + (float)(orbitHorizontal * tiltSine + orbitVertical * tiltCosine);
+                }
+                else
+                {
+                    double span = width + 48;
+                    double drift = star.Horizontal * span - seconds * (0.12 + star.Depth * 0.32);
+                    horizontal = (float)((drift % span + span) % span) - 24;
+                    vertical = star.Vertical * (height + 48) - 24 + (float)Math.Sin(seconds * 0.018 + star.Phase) * 3;
+                }
+                horizontal += horizontalShift * (4 + star.Depth * 14);
+                vertical += verticalShift * (4 + star.Depth * 14);
+                float shimmer = (float)(0.97 + Math.Sin(seconds * 0.18 + star.Phase) * 0.03);
+                DrawStar(horizontal, vertical, star, star.Flux * shimmer);
+            }
+            BitmapData data = image.LockBits(new Rectangle(Point.Empty, image.Size), ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
+            try { Marshal.Copy(pixels, 0, data.Scan0, pixels.Length); }
+            finally { image.UnlockBits(data); }
+            GraphicsState original = graphics.Save();
+            try
+            {
+                graphics.CompositingMode = CompositingMode.SourceCopy;
+                graphics.DrawImageUnscaled(image, 0, 0);
+            }
+            finally { graphics.Restore(original); }
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            if (image != null) { image.Dispose(); image = null; }
+            background = null;
+            pixels = null;
+        }
+    }
+
+    public sealed class StarfieldForm : Form
+    {
+        private readonly Timer animationTimer;
+        private readonly Stopwatch animationClock = new Stopwatch();
+        private StarfieldRenderer renderer;
+        private Bitmap frame;
+        private bool active, resizing, failed, disposing;
+        private bool motionEnabled = true;
+        private bool animationsAllowed;
+        private bool highContrast;
+        private double lastTick, sceneTime;
+        private PointF smoothPointer = new PointF(0.5f, 0.5f);
+        private float pointerInfluence;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SystemParametersInfo(uint action, uint parameter, [MarshalAs(UnmanagedType.Bool)] out bool value, uint flags);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int valueSize);
+
+        public event EventHandler AppearanceChanged;
+        public event EventHandler MotionStateChanged;
+
+        public StarfieldForm()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            animationTimer = new Timer();
+            animationTimer.Interval = 33;
+            animationTimer.Tick += AnimateBackground;
+            RefreshPreferences();
+        }
+
+        public bool SceneEnabled { get { return !highContrast && !failed; } }
+        public bool MotionAvailable { get { return SceneEnabled && animationsAllowed; } }
+        public bool IsAnimationRunning { get { return !disposing && animationTimer.Enabled; } }
+        public double SceneTime { get { return sceneTime; } }
+        public long RenderedFrameCount { get; private set; }
+        public bool MotionEnabled
+        {
+            get { return motionEnabled; }
+            set
+            {
+                if (motionEnabled == value) return;
+                motionEnabled = value;
+                UpdateAnimationState();
+                if (MotionStateChanged != null) MotionStateChanged(this, EventArgs.Empty);
+            }
+        }
+
+        public void RefreshPreferences()
+        {
+            bool clientAnimations;
+            bool preferenceRead = SystemParametersInfo(0x1042, 0, out clientAnimations, 0);
+            ApplyPreferences(SystemInformation.HighContrast, preferenceRead && clientAnimations, SystemInformation.TerminalServerSession);
+        }
+
+        private void ApplyPreferences(bool useHighContrast, bool useAnimations, bool remoteSession)
+        {
+            highContrast = useHighContrast;
+            animationsAllowed = useAnimations && !remoteSession;
+            UpdateWindowChrome();
+            UpdateAnimationState();
+            if (AppearanceChanged != null) AppearanceChanged(this, EventArgs.Empty);
+            if (MotionStateChanged != null) MotionStateChanged(this, EventArgs.Empty);
+            if (Visible) RefreshScene();
+        }
+
+        private void UpdateWindowChrome()
+        {
+            if (!IsHandleCreated || disposing) return;
+            int dark = SceneEnabled ? 1 : 0;
+            try { DwmSetWindowAttribute(Handle, 20, ref dark, sizeof(int)); }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
+        }
+
+        private void UpdateAnimationState()
+        {
+            if (animationTimer == null || disposing) return;
+            bool shouldRun = MotionEnabled && MotionAvailable && active && Visible && !resizing && WindowState != FormWindowState.Minimized;
+            if (shouldRun)
+            {
+                if (!animationTimer.Enabled)
+                {
+                    animationClock.Restart();
+                    lastTick = 0;
+                    animationTimer.Start();
+                }
+            }
+            else
+            {
+                animationTimer.Stop();
+                animationClock.Stop();
+            }
+        }
+
+        private void AnimateBackground(object sender, EventArgs arguments)
+        {
+            double now = animationClock.Elapsed.TotalSeconds;
+            double elapsed = Math.Min(0.1, Math.Max(0, now - lastTick));
+            lastTick = now;
+            sceneTime += elapsed;
+            Point pointer = PointToClient(Control.MousePosition);
+            bool inside = ClientRectangle.Contains(pointer);
+            PointF target = inside ? new PointF(pointer.X / (float)Math.Max(1, ClientSize.Width), pointer.Y / (float)Math.Max(1, ClientSize.Height)) : new PointF(0.5f, 0.5f);
+            float blend = (float)(1 - Math.Exp(-elapsed * 2.8));
+            smoothPointer.X += (target.X - smoothPointer.X) * blend;
+            smoothPointer.Y += (target.Y - smoothPointer.Y) * blend;
+            pointerInfluence += ((inside ? 1 : 0) - pointerInfluence) * blend;
+            RefreshScene();
+        }
+
+        public void RefreshScene()
+        {
+            if (disposing || !IsHandleCreated || !Visible || WindowState == FormWindowState.Minimized) return;
+            if (!SceneEnabled) { InvalidateSurfaces(this); return; }
+            Stopwatch renderClock = Stopwatch.StartNew();
+            try
+            {
+                if (renderer == null) renderer = new StarfieldRenderer();
+                float scale = Math.Min(1, 1920f / Math.Max(1, Math.Max(ClientSize.Width, ClientSize.Height)));
+                Size size = new Size(Math.Max(1, (int)(ClientSize.Width * scale)), Math.Max(1, (int)(ClientSize.Height * scale)));
+                if (frame == null || frame.Size != size)
+                {
+                    Bitmap replacement = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppPArgb);
+                    if (frame != null) frame.Dispose();
+                    frame = replacement;
+                }
+                using (Graphics graphics = Graphics.FromImage(frame)) renderer.Render(graphics, size, sceneTime, smoothPointer, pointerInfluence);
+                RenderedFrameCount++;
+                renderClock.Stop();
+                int minimumInterval = SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline ? 50 : 33;
+                animationTimer.Interval = Math.Max(minimumInterval, Math.Min(100, (int)(renderClock.Elapsed.TotalMilliseconds * 3)));
+            }
+            catch (Exception failure)
+            {
+                if (!(failure is ArgumentException || failure is ExternalException || failure is OutOfMemoryException)) throw;
+                failed = true;
+                animationTimer.Stop();
+                if (renderer != null) { renderer.Dispose(); renderer = null; }
+                if (frame != null) { frame.Dispose(); frame = null; }
+                UpdateWindowChrome();
+                if (AppearanceChanged != null) AppearanceChanged(this, EventArgs.Empty);
+                if (MotionStateChanged != null) MotionStateChanged(this, EventArgs.Empty);
+            }
+            InvalidateSurfaces(this);
+        }
+
+        private static void InvalidateSurfaces(Control control)
+        {
+            if (control is TextBoxBase || control is ListBox || control is ComboBox || control is DataGridView || control is Button) return;
+            control.Invalidate();
+            foreach (Control child in control.Controls) InvalidateSurfaces(child);
+        }
+
+        public bool PaintScene(Control surface, Graphics graphics)
+        {
+            if (!SceneEnabled || frame == null || disposing) return false;
+            Point origin = surface == this ? Point.Empty : PointToClient(surface.PointToScreen(Point.Empty));
+            float scaleHorizontal = frame.Width / (float)Math.Max(1, ClientSize.Width);
+            float scaleVertical = frame.Height / (float)Math.Max(1, ClientSize.Height);
+            Rectangle destination = surface.ClientRectangle;
+            RectangleF source = new RectangleF(origin.X * scaleHorizontal, origin.Y * scaleVertical, destination.Width * scaleHorizontal, destination.Height * scaleVertical);
+            graphics.DrawImage(frame, destination, source, GraphicsUnit.Pixel);
+            return true;
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs arguments)
+        {
+            if (!PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+        }
+
+        protected override void OnHandleCreated(EventArgs arguments)
+        {
+            base.OnHandleCreated(arguments);
+            UpdateWindowChrome();
+        }
+
+        protected override void OnShown(EventArgs arguments)
+        {
+            base.OnShown(arguments);
+            StarfieldForm owner = Owner as StarfieldForm;
+            if (owner != null) MotionEnabled = owner.MotionEnabled;
+            RefreshScene();
+            UpdateAnimationState();
+        }
+
+        protected override void OnActivated(EventArgs arguments)
+        {
+            base.OnActivated(arguments);
+            active = true;
+            UpdateAnimationState();
+        }
+
+        protected override void OnDeactivate(EventArgs arguments)
+        {
+            active = false;
+            UpdateAnimationState();
+            base.OnDeactivate(arguments);
+        }
+
+        protected override void OnVisibleChanged(EventArgs arguments)
+        {
+            base.OnVisibleChanged(arguments);
+            UpdateAnimationState();
+        }
+
+        protected override void OnResize(EventArgs arguments)
+        {
+            base.OnResize(arguments);
+            if (animationTimer == null) return;
+            UpdateAnimationState();
+            if (!resizing) RefreshScene();
+        }
+
+        protected override void OnResizeBegin(EventArgs arguments)
+        {
+            resizing = true;
+            UpdateAnimationState();
+            base.OnResizeBegin(arguments);
+        }
+
+        protected override void OnResizeEnd(EventArgs arguments)
+        {
+            resizing = false;
+            RefreshScene();
+            UpdateAnimationState();
+            base.OnResizeEnd(arguments);
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            base.WndProc(ref message);
+            if ((message.Msg == 0x001A || message.Msg == 0x0015) && animationTimer != null && !disposing) RefreshPreferences();
+        }
+
+        protected override void Dispose(bool managed)
+        {
+            if (managed && !disposing)
+            {
+                disposing = true;
+                animationTimer.Stop();
+                animationTimer.Dispose();
+                animationClock.Stop();
+                if (frame != null) { frame.Dispose(); frame = null; }
+                if (renderer != null) { renderer.Dispose(); renderer = null; }
+            }
+            base.Dispose(managed);
+        }
+    }
+
+    public sealed class SpaceTableLayoutPanel : TableLayoutPanel
+    {
+        public SpaceTableLayoutPanel() { DoubleBuffered = true; BackColor = Color.Transparent; }
+        protected override void OnPaintBackground(PaintEventArgs arguments)
+        {
+            StarfieldForm form = FindForm() as StarfieldForm;
+            if (form == null || !form.PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+        }
+    }
+
+    public sealed class SpaceFlowLayoutPanel : FlowLayoutPanel
+    {
+        public SpaceFlowLayoutPanel() { DoubleBuffered = true; BackColor = Color.Transparent; }
+        protected override void OnPaintBackground(PaintEventArgs arguments)
+        {
+            StarfieldForm form = FindForm() as StarfieldForm;
+            if (form == null || !form.PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+        }
+    }
+
+    public sealed class SpacePanel : Panel
+    {
+        public SpacePanel() { DoubleBuffered = true; BackColor = Color.Transparent; }
+        protected override void OnLayout(LayoutEventArgs arguments)
+        {
+            base.OnLayout(arguments);
+            if (AutoScroll && Controls.Count == 1)
+            {
+                Control content = Controls[0];
+                int height = content.GetPreferredSize(new Size(content.Width, 0)).Height + content.Margin.Vertical;
+                if (AutoScrollMinSize.Height != height) AutoScrollMinSize = new Size(0, height);
+                AdjustFormScrollbars(true);
+            }
+        }
+        protected override void OnPaintBackground(PaintEventArgs arguments)
+        {
+            StarfieldForm form = FindForm() as StarfieldForm;
+            if (form == null || !form.PaintScene(this, arguments.Graphics)) base.OnPaintBackground(arguments);
+        }
+    }
+
+    public sealed class IconCheckBox : CheckBox
+    {
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            Size preferred = base.GetPreferredSize(proposedSize);
+            if (Image == null) return preferred;
+            Size text = TextRenderer.MeasureText(Text.Replace("&", ""), Font);
+            int width = text.Width + Image.Width + Padding.Horizontal + Math.Max(18, Font.Height) + 6;
+            return new Size(Math.Max(preferred.Width, width), Math.Max(preferred.Height, Image.Height + Padding.Vertical + 4));
+        }
+    }
+}
+'@
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { $fingerprint = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($typeSource))).Replace('-', '').Substring(0, 24) }
+    finally { $hash.Dispose() }
+    $uiNamespace = 'EasyEdgeApps.Native_' + $fingerprint
+    if (-not (($uiNamespace + '.StarfieldForm') -as [type])) {
+        Add-Type -ReferencedAssemblies $references -TypeDefinition $typeSource.Replace('namespace EasyEdgeApps', ('namespace ' + $uiNamespace)) -ErrorAction Stop
+    }
+    return $uiNamespace
+}
+
+function Set-EeaSpaceTheme {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form, $Control = $Form)
+
+    $space = $Form.SceneEnabled
+    $foreground = if ($space) { [Drawing.Color]::FromArgb(235, 241, 245) } else { [Drawing.SystemColors]::WindowText }
+    $surface = if ($space) { [Drawing.Color]::FromArgb(17, 23, 28) } else { [Drawing.SystemColors]::Window }
+    $border = if ($space) { [Drawing.Color]::FromArgb(65, 78, 87) } else { [Drawing.SystemColors]::ControlDark }
+    $primary = $null
+    if ($null -ne $Form.Tag) {
+        if ($null -ne $Form.Tag.PSObject.Properties['SaveButton']) { $primary = $Form.Tag.SaveButton }
+        elseif ($null -ne $Form.Tag.PSObject.Properties['ApplyButton']) { $primary = $Form.Tag.ApplyButton }
+    }
+    if ($Control -is [Windows.Forms.Button]) {
+        if (-not [object]::ReferenceEquals($Control, $primary)) {
+            $Control.ForeColor = if ($space) { $foreground } else { [Drawing.SystemColors]::ControlText }
+            $Control.BackColor = if ($space) { [Drawing.Color]::FromArgb(28, 36, 42) } else { [Drawing.SystemColors]::Control }
+            $Control.FlatStyle = if ($space) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
+            $Control.UseVisualStyleBackColor = -not $space
+            $Control.FlatAppearance.BorderColor = $border
+            $Control.FlatAppearance.MouseOverBackColor = if ($space) { [Drawing.Color]::FromArgb(43, 56, 65) } else { [Drawing.Color]::Empty }
+            $Control.FlatAppearance.MouseDownBackColor = if ($space) { [Drawing.Color]::FromArgb(51, 67, 78) } else { [Drawing.Color]::Empty }
+        }
+        return
+    }
+    $Control.ForeColor = $foreground
+    if ($Control -is [Windows.Forms.Form]) { $Control.BackColor = if ($space) { [Drawing.Color]::FromArgb(4, 8, 12) } else { $surface } }
+    elseif ($Control -is [Windows.Forms.TextBoxBase] -or $Control -is [Windows.Forms.ListBox]) {
+        $Control.BackColor = $surface
+        $Control.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+    }
+    elseif ($Control -is [Windows.Forms.ComboBox]) {
+        $Control.BackColor = $surface
+        $Control.FlatStyle = if ($space) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
+    }
+    elseif ($Control -is [Windows.Forms.DataGridView]) {
+        $Control.BackgroundColor = $surface
+        $Control.GridColor = $border
+        $Control.EnableHeadersVisualStyles = -not $space
+        $Control.DefaultCellStyle.BackColor = $surface
+        $Control.DefaultCellStyle.ForeColor = $foreground
+        $Control.DefaultCellStyle.SelectionBackColor = [Drawing.SystemColors]::Highlight
+        $Control.DefaultCellStyle.SelectionForeColor = [Drawing.SystemColors]::HighlightText
+        $Control.ColumnHeadersDefaultCellStyle.BackColor = if ($space) { [Drawing.Color]::FromArgb(28, 36, 42) } else { [Drawing.SystemColors]::Control }
+        $Control.ColumnHeadersDefaultCellStyle.ForeColor = $foreground
+        return
+    }
+    elseif ($space -and ($Control -is [Windows.Forms.Label] -or $Control -is [Windows.Forms.CheckBox])) {
+        $Control.BackColor = [Drawing.Color]::FromArgb(160, 4, 8, 12)
+    }
+    else { $Control.BackColor = [Drawing.Color]::Transparent }
+    foreach ($child in $Control.Controls) { Set-EeaSpaceTheme -Form $Form -Control $child }
+}
+
+function Enable-EeaSpaceTheme {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $Form.Add_AppearanceChanged({ param($Sender, $EventArgs) Set-EeaSpaceTheme $Sender })
+    Set-EeaSpaceTheme $Form
+}
+
+function New-EeaSymbolImage {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Icon, [Parameter(Mandatory = $true)][int]$Size, [Parameter(Mandatory = $true)]$Color)
+
+    $symbols = @{
+        Apps = 0xE71D; Add = 0xE710; Save = 0xE74E; Open = 0xE8A7; Remove = 0xE74D
+        Export = 0xE898; Import = 0xE896; Favorites = 0xE734; Check = 0xE73E; Repair = 0xE90F
+        Refresh = 0xE72C; Close = 0xE711; Image = 0xEB9F; Name = 0xE8AC; Link = 0xE71B
+        Notes = 0xE70B; Privacy = 0xEA18; Lock = 0xE72E; Unlock = 0xE785; Info = 0xE946
+        Desktop = 0xE7F4; Start = 0xE8FC; SelectAll = 0xE8B3; Motion = 0xE768
+    }
+    if (-not $symbols.ContainsKey($Icon)) { throw 'An interface icon is not recognized.' }
+    $font = $null
+    $bitmap = $null
+    $graphics = $null
+    $brush = $null
+    $format = $null
+    try {
+        foreach ($fontName in @('Segoe Fluent Icons', 'Segoe MDL2 Assets')) {
+            $candidate = New-Object Drawing.Font($fontName, [single]($Size * 0.85), [Drawing.FontStyle]::Regular, [Drawing.GraphicsUnit]::Pixel)
+            if ($candidate.Name -eq $fontName) { $font = $candidate; break }
+            $candidate.Dispose()
+        }
+        if ($null -eq $font) { return $null }
+        $bitmap = New-Object Drawing.Bitmap($Size, $Size, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        $graphics.Clear([Drawing.Color]::Transparent)
+        $graphics.TextRenderingHint = [Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $brush = New-Object Drawing.SolidBrush($Color)
+        $format = [Drawing.StringFormat]::GenericTypographic.Clone()
+        $format.Alignment = [Drawing.StringAlignment]::Center
+        $format.LineAlignment = [Drawing.StringAlignment]::Center
+        $graphics.DrawString(([char]$symbols[$Icon]).ToString(), $font, $brush, (New-Object Drawing.RectangleF(0, 0, $Size, $Size)), $format)
+        $bitmap.Tag = $Icon
+        return $bitmap
+    }
+    catch { if ($null -ne $bitmap) { $bitmap.Dispose() }; throw }
+    finally {
+        if ($null -ne $format) { $format.Dispose() }
+        if ($null -ne $brush) { $brush.Dispose() }
+        if ($null -ne $graphics) { $graphics.Dispose() }
+        if ($null -ne $font) { $font.Dispose() }
+    }
+}
+
+function Set-EeaControlIcon {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)][string]$Icon)
+
+    if ($Control.IsDisposed) { return }
+    $size = [Math]::Max(16, [Math]::Min(64, $Control.Font.Height - 2))
+    $color = if ($Control.Enabled) { $Control.ForeColor } else { [Drawing.SystemColors]::GrayText }
+    $image = New-EeaSymbolImage -Icon $Icon -Size $size -Color $color
+    if ($null -eq $image) { return }
+    $isLabel = $Control -is [Windows.Forms.Label]
+    $previousImage = if ($isLabel) { $Control.Tag } else { $Control.Image }
+    if ($isLabel) {
+        $Control.Tag = $image
+        $Control.Padding = New-Object Windows.Forms.Padding(($size + [Math]::Max(6, [int][Math]::Round($size / 4.0))), 0, 0, 0)
+        $Control.Invalidate()
+    }
+    else { $Control.Image = $image }
+    if ($null -ne $previousImage) { $previousImage.Dispose() }
+    else {
+        $refresh = {
+            param($Sender, $EventArgs)
+            if ($Sender.IsDisposed) { return }
+            $currentImage = if ($Sender -is [Windows.Forms.Label]) { $Sender.Tag } else { $Sender.Image }
+            if ($null -ne $currentImage) { Set-EeaControlIcon -Control $Sender -Icon $currentImage.Tag }
+        }
+        $Control.Add_FontChanged($refresh)
+        $Control.Add_ForeColorChanged($refresh)
+        $Control.Add_EnabledChanged($refresh)
+        $Control.Add_SystemColorsChanged($refresh)
+        $Control.Add_Disposed({
+            param($Sender, $EventArgs)
+            if ($Sender -is [Windows.Forms.Label]) {
+                if ($null -ne $Sender.Tag) { $Sender.Tag.Dispose(); $Sender.Tag = $null }
+            }
+            elseif ($null -ne $Sender.Image) { $Sender.Image.Dispose(); $Sender.Image = $null }
+        })
+    }
+}
+
+function New-EeaLabel {
+    [CmdletBinding()]
+    param([string]$Text = '', [string]$Icon = 'Info')
+
+    $label = New-Object Windows.Forms.Label
+    $label.AutoSize = $true
+    $label.Text = $Text
+    $label.UseMnemonic = $true
+    $label.Add_Paint({
+        param($Sender, $EventArgs)
+        if ($null -ne $Sender.Tag) {
+            $offset = [Math]::Max(0, [int][Math]::Floor(($Sender.Font.Height - $Sender.Tag.Height) / 2.0))
+            $EventArgs.Graphics.DrawImageUnscaled($Sender.Tag, 0, $offset)
+        }
+    })
+    $label.Add_PaddingChanged({
+        param($Sender, $EventArgs)
+        if ($null -ne $Sender.Tag) {
+            $left = $Sender.Tag.Width + [Math]::Max(6, [int][Math]::Round($Sender.Tag.Width / 4.0))
+            if ($Sender.Padding.Left -ne $left) { $Sender.Padding = New-Object Windows.Forms.Padding($left, 0, 0, 0) }
+        }
+    })
+    Set-EeaControlIcon -Control $label -Icon $Icon
+    return $label
+}
+
+function New-EeaCheckBox {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Text, [Parameter(Mandatory = $true)][string]$Icon)
+
+    $uiNamespace = Initialize-EeaSpaceBackground
+    $checkBox = New-Object ($uiNamespace + '.IconCheckBox')
+    $checkBox.AutoSize = $true
+    $checkBox.Text = $Text
+    $checkBox.TextImageRelation = [Windows.Forms.TextImageRelation]::ImageBeforeText
+    $checkBox.ImageAlign = [Drawing.ContentAlignment]::MiddleLeft
+    Set-EeaControlIcon -Control $checkBox -Icon $Icon
+    return $checkBox
+}
+
+function Set-EeaPrimaryButton {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Button)
+
+    $Button.FlatStyle = [Windows.Forms.FlatStyle]::Flat
+    $Button.FlatAppearance.BorderSize = 1
+    $refresh = {
+        param($Sender, $EventArgs)
+        if ($Sender.IsDisposed) { return }
+        if ($Sender.Enabled) {
+            $Sender.BackColor = [Drawing.SystemColors]::Highlight
+            $Sender.ForeColor = [Drawing.SystemColors]::HighlightText
+            $Sender.FlatAppearance.BorderColor = [Drawing.SystemColors]::Highlight
+        }
+        else {
+            $Sender.BackColor = [Drawing.SystemColors]::Control
+            $Sender.ForeColor = [Drawing.SystemColors]::GrayText
+            $Sender.FlatAppearance.BorderColor = [Drawing.SystemColors]::ControlDark
+        }
+    }
+    $Button.Add_EnabledChanged($refresh)
+    $Button.Add_SystemColorsChanged($refresh)
+    & $refresh $Button ([EventArgs]::Empty)
+}
+
+function New-EeaTextBox {
+    [CmdletBinding()]
+    param()
+
+    $textBox = New-Object Windows.Forms.TextBox
+    $textBox.Add_KeyDown({
+        param($Sender, $EventArgs)
+        if ($EventArgs.KeyCode -ne [Windows.Forms.Keys]::Back -or -not $EventArgs.Control -or $EventArgs.Alt) { return }
+        $EventArgs.SuppressKeyPress = $true
+        if ($Sender.ReadOnly) { return }
+        if ($Sender.SelectionLength -eq 0) {
+            $end = $Sender.SelectionStart
+            if ($end -eq 0) { return }
+            $text = $Sender.Text
+            $start = $end
+            while ($start -gt 0 -and [char]::IsWhiteSpace($text[$start - 1])) { $start-- }
+            while ($start -gt 0 -and -not [char]::IsWhiteSpace($text[$start - 1])) { $start-- }
+            $Sender.Select($start, $end - $start)
+        }
+        $Sender.Paste([string]::Empty)
+    })
+    return $textBox
 }
 
 function New-EeaButton {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Text)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text, [string]$Icon = 'Apps', [string]$AccessibleName)
 
     $button = New-Object Windows.Forms.Button
     $button.Text = $Text
+    if ($AccessibleName) {
+        $button.AccessibleName = $AccessibleName
+        $toolTip = New-Object Windows.Forms.ToolTip
+        $toolTip.SetToolTip($button, $AccessibleName)
+        $button.Add_Disposed({ param($Sender, $EventArgs) $toolTip.Dispose() }.GetNewClosure())
+    }
     $button.AutoSize = $true
     $button.MinimumSize = New-Object Drawing.Size(110, 40)
     $button.Padding = New-Object Windows.Forms.Padding(8, 2, 8, 2)
     $button.Margin = New-Object Windows.Forms.Padding(0, 0, 8, 8)
     $button.UseVisualStyleBackColor = $true
+    $button.TextImageRelation = [Windows.Forms.TextImageRelation]::ImageBeforeText
+    $button.ImageAlign = [Drawing.ContentAlignment]::MiddleLeft
+    Set-EeaControlIcon -Control $button -Icon $Icon
     return $button
+}
+
+function Set-EeaEditorIcon {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form, [string]$CustomIcon, [byte[]]$IconData)
+
+    $ui = $Form.Tag
+    $bitmap = $null
+    $caption = 'Automatic'
+    $website = $null
+    if ($null -ne $IconData) {
+        $website = ConvertTo-EeaWebsite $ui.UrlInput.Text
+        $bitmap = Get-EeaIconPreview -IconData $IconData
+        $caption = 'Website icon'
+    }
+    elseif ($CustomIcon) {
+        $bitmap = Get-EeaIconPreview -Path $CustomIcon
+        $caption = [IO.Path]::GetFileName($CustomIcon)
+    }
+    elseif ($ui.AppList.SelectedIndex -ge 0) {
+        $paths = Get-EeaPaths $ui.Context $ui.AppList.SelectedItem.Name
+        $bitmap = Get-EeaIconPreview -Path $paths.Icon
+        $caption = 'Saved icon'
+    }
+    $previous = $ui.IconPreview.Image
+    $ui.IconPreview.Image = $bitmap
+    $ui.CustomIcon = $CustomIcon
+    $ui.WebsiteIconData = $IconData
+    $ui.WebsiteIconUrl = $website
+    $ui.IconLabel.Text = $caption
+    if ($null -ne $previous) { $previous.Dispose() }
+}
+
+function Stop-EeaWebsiteIconLookup {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $ui = $Form.Tag
+    if ($null -ne $ui.IconRequest) {
+        $ui.IconRequest.Discard = $true
+        $ui.IconRequest.Cancellation.Cancel()
+        $ui.CancelIconButton.Enabled = $false
+        $ui.StatusLabel.Text = 'Cancelling icon lookup...'
+    }
+}
+
+function Complete-EeaWebsiteIconLookup {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $ui = $Form.Tag
+    $request = $ui.IconRequest
+    if ($null -eq $request -or -not $request.AsyncResult.IsCompleted) { return }
+    try {
+        $result = @($request.PowerShell.EndInvoke($request.AsyncResult))
+        if (-not $request.Discard -and -not $request.Cancellation.IsCancellationRequested -and
+            (ConvertTo-EeaWebsite $ui.UrlInput.Text) -ceq $request.Website) {
+            if ($result.Count -ne 1) { throw 'The website did not return an icon.' }
+            Set-EeaEditorIcon -Form $Form -IconData $result[0].Bytes
+            $ui.StatusLabel.Text = 'Website icon retrieved.'
+        }
+        else { $ui.StatusLabel.Text = 'Icon lookup cancelled.' }
+    }
+    catch {
+        $ui.StatusLabel.Text = if ($request.Discard -or $request.Cancellation.IsCancellationRequested) { 'Icon lookup cancelled.' }
+            else { 'Could not retrieve an icon. Your current icon has not changed.' }
+    }
+    finally {
+        $request.PowerShell.Dispose()
+        $request.Cancellation.Dispose()
+        $ui.IconRequest = $null
+        $ui.IconTimer.Stop()
+        $ui.GetIconButton.Enabled = $true
+        $ui.CancelIconButton.Enabled = $false
+        $ui.SaveButton.Enabled = $true
+    }
+    if ($ui.CloseAfterIconLookup) { $Form.Close() }
 }
 
 function Reset-EeaEditor {
@@ -1754,6 +2976,7 @@ function Reset-EeaEditor {
     param([Parameter(Mandatory = $true)]$Form)
 
     $ui = $Form.Tag
+    Stop-EeaWebsiteIconLookup $Form
     $ui.AppList.SelectedIndex = -1
     $ui.NameInput.ReadOnly = $false
     $ui.NameInput.Clear()
@@ -1762,9 +2985,12 @@ function Reset-EeaEditor {
     $ui.DesktopCheck.Checked = $true
     $ui.StartMenuCheck.Checked = $true
     $ui.CustomIcon = $null
+    $ui.WebsiteIconData = $null
+    $ui.WebsiteIconUrl = $null
     $ui.IconLabel.Text = 'Automatic'
     if ($null -ne $ui.IconPreview.Image) { $ui.IconPreview.Image.Dispose(); $ui.IconPreview.Image = $null }
     $ui.SaveButton.Text = '&Add website'
+    Set-EeaControlIcon -Control $ui.SaveButton -Icon Add
     $ui.OpenButton.Enabled = $false
     $ui.RemoveButton.Enabled = $false
     [void]$ui.NameInput.Focus()
@@ -1815,19 +3041,20 @@ function New-EeaSetupForm {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
     [Windows.Forms.Application]::EnableVisualStyles()
-    $form = New-Object Windows.Forms.Form
+    $uiNamespace = Initialize-EeaSpaceBackground
+    $form = New-Object ($uiNamespace + '.StarfieldForm')
     $form.Text = 'Easy Edge Apps'
     $form.Font = New-Object Drawing.Font('Segoe UI', 12)
     $form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Font
-    $form.ClientSize = New-Object Drawing.Size(880, 620)
+    $form.ClientSize = New-Object Drawing.Size(1000, 700)
     $form.MinimumSize = New-Object Drawing.Size(800, 640)
     $form.StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
-    $form.BackColor = [Drawing.SystemColors]::Control
-    $form.ForeColor = [Drawing.SystemColors]::ControlText
+    $form.BackColor = [Drawing.SystemColors]::Window
+    $form.ForeColor = [Drawing.SystemColors]::WindowText
     Set-EeaFormIcon $form
     $form.Padding = New-Object Windows.Forms.Padding(20)
 
-    $layout = New-Object Windows.Forms.TableLayoutPanel
+    $layout = New-Object ($uiNamespace + '.SpaceTableLayoutPanel')
     $layout.Dock = [Windows.Forms.DockStyle]::Fill
     $layout.ColumnCount = 1
     $layout.RowCount = 4
@@ -1838,15 +3065,16 @@ function New-EeaSetupForm {
     [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     $form.Controls.Add($layout)
 
-    $headingLayout = New-Object Windows.Forms.TableLayoutPanel
+    $headingLayout = New-Object ($uiNamespace + '.SpaceTableLayoutPanel')
     $headingLayout.Dock = [Windows.Forms.DockStyle]::Fill
     $headingLayout.AutoSize = $true
     $headingLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $headingLayout.Margin = New-Object Windows.Forms.Padding(0)
-    $headingLayout.ColumnCount = 2
+    $headingLayout.ColumnCount = 3
     $headingLayout.RowCount = 1
     [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Absolute, 48)))
     [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
+    [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::AutoSize)))
     [void]$headingLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     $brandPicture = New-Object Windows.Forms.PictureBox
     $brandPicture.Size = New-Object Drawing.Size(32, 32)
@@ -1864,9 +3092,18 @@ function New-EeaSetupForm {
     $heading.Anchor = [Windows.Forms.AnchorStyles]::Left
     $heading.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 16)
     $headingLayout.Controls.Add($heading, 1, 0)
+    $motionCheck = New-EeaCheckBox '&Motion' -Icon Motion
+    $motionCheck.AccessibleName = 'Animate the space background'
+    $motionCheck.AccessibleDescription = 'Pause or resume background motion. Windows accessibility preferences take precedence.'
+    $motionCheck.Anchor = [Windows.Forms.AnchorStyles]::Right
+    $motionCheck.Margin = New-Object Windows.Forms.Padding(12, 0, 0, 16)
+    $motionCheck.Enabled = $form.MotionAvailable
+    $motionCheck.Checked = $form.MotionEnabled -and $form.MotionAvailable
+    $motionCheck.Add_CheckedChanged({ param($Sender, $EventArgs) if ($Sender.Enabled) { $Sender.FindForm().MotionEnabled = $Sender.Checked } })
+    $headingLayout.Controls.Add($motionCheck, 2, 0)
     $layout.Controls.Add($headingLayout, 0, 0)
 
-    $content = New-Object Windows.Forms.TableLayoutPanel
+    $content = New-Object ($uiNamespace + '.SpaceTableLayoutPanel')
     $content.Dock = [Windows.Forms.DockStyle]::Fill
     $content.ColumnCount = 2
     $content.RowCount = 1
@@ -1875,7 +3112,7 @@ function New-EeaSetupForm {
     [void]$content.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 66)))
     $layout.Controls.Add($content, 0, 1)
 
-    $listPanel = New-Object Windows.Forms.TableLayoutPanel
+    $listPanel = New-Object ($uiNamespace + '.SpaceTableLayoutPanel')
     $listPanel.Dock = [Windows.Forms.DockStyle]::Fill
     $listPanel.ColumnCount = 1
     $listPanel.RowCount = 3
@@ -1884,7 +3121,7 @@ function New-EeaSetupForm {
     [void]$listPanel.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     [void]$listPanel.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Percent, 100)))
     [void]$listPanel.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
-    $listLabel = New-Object Windows.Forms.Label
+    $listLabel = New-EeaLabel -Icon Apps
     $listLabel.Text = '&Websites'
     $listLabel.AutoSize = $true
     $listPanel.Controls.Add($listLabel, 0, 0)
@@ -1896,16 +3133,16 @@ function New-EeaSetupForm {
     $appList.AccessibleName = 'Saved websites'
     $appList.TabIndex = 1
     $listPanel.Controls.Add($appList, 0, 1)
-    $newButton = New-EeaButton '&New website'
+    $newButton = New-EeaButton '&New' -Icon Add -AccessibleName 'New website'
     $newButton.TabIndex = 2
     $listPanel.Controls.Add($newButton, 0, 2)
     $content.Controls.Add($listPanel, 0, 0)
 
-    $editorViewport = New-Object Windows.Forms.Panel
+    $editorViewport = New-Object ($uiNamespace + '.SpacePanel')
     $editorViewport.Dock = [Windows.Forms.DockStyle]::Fill
     $editorViewport.AutoScroll = $true
     $content.Controls.Add($editorViewport, 1, 0)
-    $editor = New-Object Windows.Forms.TableLayoutPanel
+    $editor = New-Object ($uiNamespace + '.SpaceTableLayoutPanel')
     $editor.Dock = [Windows.Forms.DockStyle]::Top
     $editor.AutoSize = $true
     $editor.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
@@ -1916,24 +3153,24 @@ function New-EeaSetupForm {
         [void]$editor.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     }
     $editorViewport.Controls.Add($editor)
-    $nameLabel = New-Object Windows.Forms.Label
+    $nameLabel = New-EeaLabel -Icon Name
     $nameLabel.Text = '&Name'
     $nameLabel.AutoSize = $true
     $nameLabel.TabIndex = 0
     $editor.Controls.Add($nameLabel, 0, 0)
-    $nameInput = New-Object Windows.Forms.TextBox
+    $nameInput = New-EeaTextBox
     $nameInput.Dock = [Windows.Forms.DockStyle]::Top
     $nameInput.MaxLength = 60
     $nameInput.AccessibleName = 'Website name'
     $nameInput.TabIndex = 1
     $nameInput.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 14)
     $editor.Controls.Add($nameInput, 0, 1)
-    $urlLabel = New-Object Windows.Forms.Label
+    $urlLabel = New-EeaLabel -Icon Link
     $urlLabel.Text = 'Website &address'
     $urlLabel.AutoSize = $true
     $urlLabel.TabIndex = 2
     $editor.Controls.Add($urlLabel, 0, 2)
-    $urlInput = New-Object Windows.Forms.TextBox
+    $urlInput = New-EeaTextBox
     $urlInput.Dock = [Windows.Forms.DockStyle]::Top
     $urlInput.MaxLength = 2048
     $urlInput.AccessibleName = 'Website address starting with https'
@@ -1941,12 +3178,12 @@ function New-EeaSetupForm {
     $urlInput.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 14)
     $editor.Controls.Add($urlInput, 0, 3)
 
-    $notesLabel = New-Object Windows.Forms.Label
+    $notesLabel = New-EeaLabel -Icon Notes
     $notesLabel.Text = 'Helper &notes (optional)'
     $notesLabel.AutoSize = $true
     $notesLabel.TabIndex = 4
     $editor.Controls.Add($notesLabel, 0, 4)
-    $notesInput = New-Object Windows.Forms.TextBox
+    $notesInput = New-EeaTextBox
     $notesInput.Multiline = $true
     $notesInput.AcceptsReturn = $true
     $notesInput.ScrollBars = [Windows.Forms.ScrollBars]::Vertical
@@ -1958,23 +3195,21 @@ function New-EeaSetupForm {
     $notesInput.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 14)
     $editor.Controls.Add($notesInput, 0, 5)
 
-    $placement = New-Object Windows.Forms.FlowLayoutPanel
+    $placement = New-Object ($uiNamespace + '.SpaceFlowLayoutPanel')
     $placement.AutoSize = $true
     $placement.Dock = [Windows.Forms.DockStyle]::Fill
     $placement.TabIndex = 6
-    $desktopCheck = New-Object Windows.Forms.CheckBox
-    $desktopCheck.Text = '&Desktop'
+    $desktopCheck = New-EeaCheckBox '&Desktop' -Icon Desktop
     $desktopCheck.AutoSize = $true
     $desktopCheck.Checked = $true
     $desktopCheck.Margin = New-Object Windows.Forms.Padding(0, 0, 20, 8)
-    $startMenuCheck = New-Object Windows.Forms.CheckBox
-    $startMenuCheck.Text = 'Start &menu'
+    $startMenuCheck = New-EeaCheckBox 'Start &menu' -Icon Start
     $startMenuCheck.AutoSize = $true
     $startMenuCheck.Checked = $true
     $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck))
     $editor.Controls.Add($placement, 0, 6)
 
-    $iconPanel = New-Object Windows.Forms.FlowLayoutPanel
+    $iconPanel = New-Object ($uiNamespace + '.SpaceFlowLayoutPanel')
     $iconPanel.AutoSize = $true
     $iconPanel.Dock = [Windows.Forms.DockStyle]::Fill
     $iconPanel.TabIndex = 7
@@ -1983,59 +3218,81 @@ function New-EeaSetupForm {
     $iconPreview.SizeMode = [Windows.Forms.PictureBoxSizeMode]::Zoom
     $iconPreview.AccessibleName = 'Website icon'
     $iconPreview.Margin = New-Object Windows.Forms.Padding(0, 0, 8, 8)
-    $iconButton = New-EeaButton 'Choose &icon...'
-    $clearIconButton = New-EeaButton 'Use &saved icon'
-    $iconPanel.Controls.AddRange([Windows.Forms.Control[]]@($iconPreview, $iconButton, $clearIconButton))
+    $getIconButton = New-EeaButton '&Get icon' -Icon Import -AccessibleName 'Get website icon'
+    $getIconButton.AccessibleDescription = 'Retrieve the icon from the website address without browser cookies or passwords.'
+    $cancelIconButton = New-EeaButton '' -Icon Close -AccessibleName 'Cancel icon lookup'
+    $cancelIconButton.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $cancelIconButton.MinimumSize = New-Object Drawing.Size(40, 40)
+    $cancelIconButton.Size = New-Object Drawing.Size(40, 40)
+    $cancelIconButton.ImageAlign = [Drawing.ContentAlignment]::MiddleCenter
+    $cancelIconButton.Enabled = $false
+    $iconButton = New-EeaButton 'Choose &icon...' -Icon Image
+    $clearIconButton = New-EeaButton 'Use &saved icon' -Icon Image
+    $iconPanel.Controls.AddRange([Windows.Forms.Control[]]@($iconPreview, $getIconButton, $cancelIconButton, $iconButton, $clearIconButton))
     $editor.Controls.Add($iconPanel, 0, 7)
-    $iconLabel = New-Object Windows.Forms.Label
+    $iconLabel = New-EeaLabel -Icon Image
     $iconLabel.AutoSize = $true
     $iconLabel.Text = 'Automatic'
     $iconLabel.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 16)
     $editor.Controls.Add($iconLabel, 0, 8)
 
-    $actions = New-Object Windows.Forms.FlowLayoutPanel
+    $actions = New-Object ($uiNamespace + '.SpaceFlowLayoutPanel')
     $actions.AutoSize = $true
     $actions.Dock = [Windows.Forms.DockStyle]::Top
     $actions.TabIndex = 8
-    $saveButton = New-EeaButton '&Add website'
-    $openButton = New-EeaButton '&Open'
-    $removeButton = New-EeaButton '&Remove...'
+    $saveButton = New-EeaButton '&Add website' -Icon Add
+    Set-EeaPrimaryButton $saveButton
+    $openButton = New-EeaButton '&Open' -Icon Open
+    $removeButton = New-EeaButton '&Remove...' -Icon Remove
     $openButton.Enabled = $false
     $removeButton.Enabled = $false
     $actions.Controls.AddRange([Windows.Forms.Control[]]@($saveButton, $openButton, $removeButton))
     $editor.Controls.Add($actions, 0, 9)
 
-    $statusLabel = New-Object Windows.Forms.Label
+    $statusLabel = New-EeaLabel -Icon Info
     $statusLabel.AutoSize = $true
     $statusLabel.Dock = [Windows.Forms.DockStyle]::Fill
     $statusLabel.AccessibleName = 'Status'
     $statusLabel.Margin = New-Object Windows.Forms.Padding(0, 12, 0, 12)
     $statusLabel.Text = 'Ready'
     $layout.Controls.Add($statusLabel, 0, 2)
-    $closeButton = New-EeaButton '&Close'
+    $closeButton = New-EeaButton '&Close' -Icon Close
     $closeButton.Anchor = [Windows.Forms.AnchorStyles]::Right
     $closeButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
-    $footer = New-Object Windows.Forms.FlowLayoutPanel
+    $footer = New-Object ($uiNamespace + '.SpaceFlowLayoutPanel')
     $footer.Dock = [Windows.Forms.DockStyle]::Fill
     $footer.AutoSize = $true
-    $exportButton = New-EeaButton '&Export App Kit...'
-    $importButton = New-EeaButton '&Import App Kit...'
-    $favoritesButton = New-EeaButton 'Edge &Favorites bar...'
-    $checkButton = New-EeaButton 'C&heck Apps...'
+    $exportButton = New-EeaButton '&Export kit...' -Icon Export -AccessibleName 'Export App Kit'
+    $importButton = New-EeaButton '&Import kit...' -Icon Import -AccessibleName 'Import App Kit'
+    $favoritesButton = New-EeaButton '&Favorites...' -Icon Favorites -AccessibleName 'Edge Favorites bar'
+    $checkButton = New-EeaButton 'C&heck apps...' -Icon Check -AccessibleName 'Check and Repair Apps'
     $footer.Controls.AddRange([Windows.Forms.Control[]]@($exportButton, $importButton, $favoritesButton, $checkButton, $closeButton))
     $layout.Controls.Add($footer, 0, 3)
     $form.AcceptButton = $saveButton
     $form.CancelButton = $closeButton
+    $iconTimer = New-Object Windows.Forms.Timer
+    $iconTimer.Interval = 100
+    $iconTimer.Tag = $form
+    $iconTimer.Add_Tick({ param($Sender, $EventArgs) Complete-EeaWebsiteIconLookup $Sender.Tag })
     $form.Tag = [pscustomobject]@{
         Context = $Context; AppList = $appList; NameInput = $nameInput; UrlInput = $urlInput; NotesInput = $notesInput
         DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck; CustomIcon = $null
+        WebsiteIconData = $null; WebsiteIconUrl = $null; IconRequest = $null; IconTimer = $iconTimer; CloseAfterIconLookup = $false
+        GetIconButton = $getIconButton; CancelIconButton = $cancelIconButton; ChooseIconButton = $iconButton; ClearIconButton = $clearIconButton
         IconPreview = $iconPreview; IconLabel = $iconLabel; StatusLabel = $statusLabel
         SaveButton = $saveButton; OpenButton = $openButton; RemoveButton = $removeButton
         NewButton = $newButton; CloseButton = $closeButton
-        EditorViewport = $editorViewport; BrandPicture = $brandPicture
+        EditorViewport = $editorViewport; BrandPicture = $brandPicture; MotionCheck = $motionCheck
         ExportButton = $exportButton; ImportButton = $importButton; FavoritesButton = $favoritesButton; CheckButton = $checkButton
         EdgeUserDataPath = $EdgeUserDataPath
     }
+    $form.Add_MotionStateChanged({
+        param($Sender, $EventArgs)
+        $check = $Sender.Tag.MotionCheck
+        $check.Enabled = $Sender.MotionAvailable
+        $check.Checked = $Sender.MotionEnabled -and $Sender.MotionAvailable
+    })
+    Enable-EeaSpaceTheme $form
 
     $appList.Add_SelectedIndexChanged({
         param($Sender, $EventArgs)
@@ -2043,6 +3300,7 @@ function New-EeaSetupForm {
         $ownerForm = $Sender.FindForm()
         $ui = $ownerForm.Tag
         $selected = $Sender.SelectedItem
+        Stop-EeaWebsiteIconLookup $ownerForm
         $ui.NameInput.Text = $selected.Name
         $ui.NameInput.ReadOnly = $true
         $ui.UrlInput.Text = $selected.Url
@@ -2050,8 +3308,11 @@ function New-EeaSetupForm {
         $ui.DesktopCheck.Checked = $selected.Desktop
         $ui.StartMenuCheck.Checked = $selected.StartMenu
         $ui.CustomIcon = $null
+        $ui.WebsiteIconData = $null
+        $ui.WebsiteIconUrl = $null
         $ui.IconLabel.Text = 'Saved icon'
         $ui.SaveButton.Text = '&Save changes'
+        Set-EeaControlIcon -Control $ui.SaveButton -Icon Save
         $ui.OpenButton.Enabled = $true
         $ui.RemoveButton.Enabled = $true
         if ($null -ne $ui.IconPreview.Image) { $ui.IconPreview.Image.Dispose(); $ui.IconPreview.Image = $null }
@@ -2064,18 +3325,44 @@ function New-EeaSetupForm {
         }
     })
     $newButton.Add_Click({ param($Sender, $EventArgs) Reset-EeaEditor $Sender.FindForm() })
+    $urlInput.Add_TextChanged({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.FindForm()
+        if ($null -eq $ownerForm -or $null -eq $ownerForm.Tag) { return }
+        $ui = $ownerForm.Tag
+        Stop-EeaWebsiteIconLookup $ownerForm
+        if ($null -ne $ui.WebsiteIconData) {
+            try { Set-EeaEditorIcon $ownerForm }
+            catch { $ui.WebsiteIconData = $null; $ui.WebsiteIconUrl = $null; $ui.IconLabel.Text = 'Icon unavailable' }
+        }
+    })
+    $getIconButton.Add_Click({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.FindForm()
+        $ui = $ownerForm.Tag
+        try {
+            if ($null -ne $ui.IconRequest) { return }
+            $ui.IconRequest = Start-EeaWebsiteIconRequest -Website $ui.UrlInput.Text
+            $ui.GetIconButton.Enabled = $false
+            $ui.CancelIconButton.Enabled = $true
+            $ui.SaveButton.Enabled = $false
+            $ui.StatusLabel.Text = 'Retrieving website icon...'
+            $ui.IconTimer.Start()
+        }
+        catch { Show-EeaFormError $ownerForm $_ }
+    })
+    $cancelIconButton.Add_Click({ param($Sender, $EventArgs) Stop-EeaWebsiteIconLookup $Sender.FindForm() })
     $iconButton.Add_Click({
         param($Sender, $EventArgs)
         $ownerForm = $Sender.FindForm()
+        Stop-EeaWebsiteIconLookup $ownerForm
         $dialog = New-Object Windows.Forms.OpenFileDialog
         $dialog.Filter = 'Windows icons (*.ico)|*.ico'
         $dialog.Title = 'Choose a website icon'
         $dialog.CheckFileExists = $true
         try {
             if ($dialog.ShowDialog($ownerForm) -eq [Windows.Forms.DialogResult]::OK) {
-                $null = Read-EeaCustomIcon $dialog.FileName
-                $ownerForm.Tag.CustomIcon = $dialog.FileName
-                $ownerForm.Tag.IconLabel.Text = [IO.Path]::GetFileName($dialog.FileName)
+                Set-EeaEditorIcon -Form $ownerForm -CustomIcon $dialog.FileName
             }
         }
         catch { Show-EeaFormError $ownerForm $_ }
@@ -2083,9 +3370,10 @@ function New-EeaSetupForm {
     })
     $clearIconButton.Add_Click({
         param($Sender, $EventArgs)
-        $ui = $Sender.FindForm().Tag
-        $ui.CustomIcon = $null
-        $ui.IconLabel.Text = if ($ui.AppList.SelectedIndex -ge 0) { 'Saved icon' } else { 'Automatic' }
+        $ownerForm = $Sender.FindForm()
+        Stop-EeaWebsiteIconLookup $ownerForm
+        try { Set-EeaEditorIcon $ownerForm }
+        catch { Show-EeaFormError $ownerForm $_ }
     })
     $saveButton.Add_Click({
         param($Sender, $EventArgs)
@@ -2096,11 +3384,12 @@ function New-EeaSetupForm {
             if ($ui.AppList.SelectedIndex -lt 0 -and $null -ne (Read-EeaManifest $ui.Context $cleanName)) {
                 if (-not (Confirm-EeaChange $ownerForm ('Replace the address and shortcut settings for "' + $cleanName + '"?') 'Update existing website?')) { return }
             }
+            if ($null -ne $ui.WebsiteIconData -and (ConvertTo-EeaWebsite $ui.UrlInput.Text) -cne $ui.WebsiteIconUrl) { throw 'The website address changed. Retrieve its icon again before saving.' }
             $ownerForm.UseWaitCursor = $true
             $ui.SaveButton.Enabled = $false
             $ui.StatusLabel.Text = 'Saving...'
             $ui.StatusLabel.Refresh()
-            $installed = Install-EeaApp -AppName $cleanName -Website $ui.UrlInput.Text -Notes $ui.NotesInput.Text -CustomIcon $ui.CustomIcon -Desktop $ui.DesktopCheck.Checked -StartMenu $ui.StartMenuCheck.Checked -Context $ui.Context -Confirm:$false
+            $installed = Install-EeaApp -AppName $cleanName -Website $ui.UrlInput.Text -Notes $ui.NotesInput.Text -CustomIcon $ui.CustomIcon -IconData $ui.WebsiteIconData -Desktop $ui.DesktopCheck.Checked -StartMenu $ui.StartMenuCheck.Checked -Context $ui.Context -Confirm:$false
             Update-EeaForm -Form $ownerForm -SelectName $installed.Name
             $ui.StatusLabel.Text = 'Saved: ' + $installed.Name
         }
@@ -2126,8 +3415,26 @@ function New-EeaSetupForm {
         }
         catch { Show-EeaFormError $ownerForm $_ }
     })
-    $form.Add_FormClosed({
+    $form.Add_FormClosing({
         param($Sender, $EventArgs)
+        if ($null -ne $Sender.Tag.IconRequest) {
+            $Sender.Tag.CloseAfterIconLookup = $true
+            Stop-EeaWebsiteIconLookup $Sender
+            $EventArgs.Cancel = $true
+            $Sender.DialogResult = [Windows.Forms.DialogResult]::None
+        }
+    })
+    $form.Add_Disposed({
+        param($Sender, $EventArgs)
+        $Sender.Tag.IconTimer.Stop()
+        $Sender.Tag.IconTimer.Dispose()
+        $Sender.Tag.IconTimer.Tag = $null
+        $request = $Sender.Tag.IconRequest
+        if ($null -ne $request) {
+            $request.Cancellation.Cancel()
+            try { $request.PowerShell.Stop() }
+            finally { $request.PowerShell.Dispose(); $request.Cancellation.Dispose(); $Sender.Tag.IconRequest = $null }
+        }
         if ($null -ne $Sender.Tag.IconPreview.Image) { $Sender.Tag.IconPreview.Image.Dispose() }
         if ($null -ne $Sender.Tag.BrandPicture.Image) { $Sender.Tag.BrandPicture.Image.Dispose(); $Sender.Tag.BrandPicture.Image = $null }
     })
@@ -2206,10 +3513,11 @@ function Select-EeaKitPath {
 
 function New-EeaScrollDialog {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Title, [Parameter(Mandatory = $true)][string]$ActionText)
+    param([Parameter(Mandatory = $true)][string]$Title, [Parameter(Mandatory = $true)][string]$ActionText, [string]$ActionIcon = 'Export')
 
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    [Windows.Forms.Application]::EnableVisualStyles()
     $form = New-Object Windows.Forms.Form
     $form.Text = $Title
     $form.Font = New-Object Drawing.Font('Segoe UI', 12)
@@ -2218,8 +3526,8 @@ function New-EeaScrollDialog {
     $form.MinimumSize = New-Object Drawing.Size(600, 450)
     $form.StartPosition = [Windows.Forms.FormStartPosition]::CenterParent
     $form.Padding = New-Object Windows.Forms.Padding(16)
-    $form.BackColor = [Drawing.SystemColors]::Control
-    $form.ForeColor = [Drawing.SystemColors]::ControlText
+    $form.BackColor = [Drawing.SystemColors]::Window
+    $form.ForeColor = [Drawing.SystemColors]::WindowText
     Set-EeaFormIcon $form
     $layout = New-Object Windows.Forms.TableLayoutPanel
     $layout.Dock = [Windows.Forms.DockStyle]::Fill
@@ -2242,7 +3550,7 @@ function New-EeaScrollDialog {
     [void]$editor.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
     $viewport.Controls.Add($editor)
     $layout.Controls.Add($viewport, 0, 0)
-    $status = New-Object Windows.Forms.Label
+    $status = New-EeaLabel -Icon Info
     $status.AutoSize = $true
     $status.Dock = [Windows.Forms.DockStyle]::Fill
     $status.Text = 'Ready'
@@ -2252,8 +3560,9 @@ function New-EeaScrollDialog {
     $actions = New-Object Windows.Forms.FlowLayoutPanel
     $actions.AutoSize = $true
     $actions.Dock = [Windows.Forms.DockStyle]::Fill
-    $apply = New-EeaButton $ActionText
-    $cancel = New-EeaButton '&Cancel'
+    $apply = New-EeaButton $ActionText -Icon $ActionIcon
+    Set-EeaPrimaryButton $apply
+    $cancel = New-EeaButton '&Cancel' -Icon Close
     $cancel.DialogResult = [Windows.Forms.DialogResult]::Cancel
     $actions.Controls.AddRange([Windows.Forms.Control[]]@($apply, $cancel))
     $layout.Controls.Add($actions, 0, 2)
@@ -2265,10 +3574,10 @@ function New-EeaScrollDialog {
 
 function Add-EeaDialogField {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)]$Form, [Parameter(Mandatory = $true)][string]$Label, [Parameter(Mandatory = $true)]$Control)
+    param([Parameter(Mandatory = $true)]$Form, [Parameter(Mandatory = $true)][string]$Label, [Parameter(Mandatory = $true)]$Control, [string]$Icon = 'Info')
 
     $editor = $Form.Tag.Editor
-    $caption = New-Object Windows.Forms.Label
+    $caption = New-EeaLabel -Icon $Icon
     $caption.Text = $Label
     $caption.AutoSize = $true
     $caption.Dock = [Windows.Forms.DockStyle]::Fill
@@ -2290,15 +3599,15 @@ function New-EeaPasswordForm {
     param([Parameter(Mandatory = $true)]$Envelope)
 
     $null = Get-EeaEnvelopeData $Envelope
-    $form = New-EeaScrollDialog -Title 'Unlock App Kit' -ActionText '&Unlock'
-    $passwordInput = New-Object Windows.Forms.TextBox
+    $form = New-EeaScrollDialog -Title 'Unlock App Kit' -ActionText '&Unlock' -ActionIcon Unlock
+    $passwordInput = New-EeaTextBox
     $passwordInput.UseSystemPasswordChar = $true
     $passwordInput.MaxLength = 1024
-    Add-EeaDialogField $form '&Password' $passwordInput
-    $notice = New-Object Windows.Forms.Label
+    Add-EeaDialogField $form '&Password' $passwordInput -Icon Lock
+    $notice = New-EeaLabel -Icon Info
     $notice.AutoSize = $true
     $notice.Text = 'A forgotten password cannot be recovered. Unlocking does not install anything or verify the sender. Imported addresses remain visible in local settings and shortcuts.'
-    Add-EeaDialogField $form 'Privacy' $notice
+    Add-EeaDialogField $form 'Privacy' $notice -Icon Privacy
     $form.Tag | Add-Member -NotePropertyName Envelope -NotePropertyValue $Envelope
     $form.Tag | Add-Member -NotePropertyName Kit -NotePropertyValue $null
     $form.Tag | Add-Member -NotePropertyName PasswordInput -NotePropertyValue $passwordInput
@@ -2335,10 +3644,10 @@ function New-EeaExportForm {
 
     $apps = @(Get-EeaApps -Context $Context | Sort-Object Name)
     $form = New-EeaScrollDialog -Title 'Export App Kit' -ActionText '&Export App Kit'
-    $nameInput = New-Object Windows.Forms.TextBox
+    $nameInput = New-EeaTextBox
     $nameInput.MaxLength = 60
     $nameInput.Text = 'My websites'
-    Add-EeaDialogField $form 'App Kit &name' $nameInput
+    Add-EeaDialogField $form 'App Kit &name' $nameInput -Icon Name
     $appList = New-Object Windows.Forms.CheckedListBox
     $appList.CheckOnClick = $true
     $appList.IntegralHeight = $false
@@ -2346,32 +3655,32 @@ function New-EeaExportForm {
     $appList.DisplayMember = 'Name'
     $appList.HorizontalScrollbar = $true
     foreach ($app in $apps) { [void]$appList.Items.Add($app, $true) }
-    Add-EeaDialogField $form '&Websites' $appList
-    $notesInput = New-Object Windows.Forms.TextBox
+    Add-EeaDialogField $form '&Websites' $appList -Icon Apps
+    $notesInput = New-EeaTextBox
     $notesInput.Multiline = $true
     $notesInput.AcceptsReturn = $true
     $notesInput.Height = 96
     $notesInput.MaxLength = 4000
     $notesInput.ScrollBars = [Windows.Forms.ScrollBars]::Vertical
-    Add-EeaDialogField $form 'Kit helper n&otes (optional)' $notesInput
+    Add-EeaDialogField $form 'Kit helper n&otes (optional)' $notesInput -Icon Notes
     $formatInput = New-Object Windows.Forms.ComboBox
     $formatInput.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
     [void]$formatInput.Items.Add('Standard JSON (readable)')
     [void]$formatInput.Items.Add('Password-protected')
     $formatInput.SelectedIndex = 1
-    Add-EeaDialogField $form '&Protection' $formatInput
-    $passwordInput = New-Object Windows.Forms.TextBox
+    Add-EeaDialogField $form '&Protection' $formatInput -Icon Privacy
+    $passwordInput = New-EeaTextBox
     $passwordInput.UseSystemPasswordChar = $true
     $passwordInput.MaxLength = 1024
-    Add-EeaDialogField $form 'Export pass&word' $passwordInput
-    $confirmationInput = New-Object Windows.Forms.TextBox
+    Add-EeaDialogField $form 'Export pass&word' $passwordInput -Icon Lock
+    $confirmationInput = New-EeaTextBox
     $confirmationInput.UseSystemPasswordChar = $true
     $confirmationInput.MaxLength = 1024
-    Add-EeaDialogField $form 'Con&firm password' $confirmationInput
-    $privacy = New-Object Windows.Forms.Label
+    Add-EeaDialogField $form 'Con&firm password' $confirmationInput -Icon Lock
+    $privacy = New-EeaLabel -Icon Info
     $privacy.AutoSize = $true
     $privacy.Text = 'Standard JSON exposes names, URLs, notes, and icons. Encryption protects only the exported file. Installed settings, shortcuts, and recovery files can reveal URLs. Browsing remains visible to Edge, websites, and network monitoring. Never use credentials, reset links, or session tokens in URLs.' + "`r`n`r`n" + 'Choose a strong, unique passphrase of at least 12 characters and share it separately. Weak passwords can be guessed offline. Forgotten passwords cannot be recovered. Independent security review is still needed before production use.'
-    Add-EeaDialogField $form 'Privacy and password safety' $privacy
+    Add-EeaDialogField $form 'Privacy and password safety' $privacy -Icon Privacy
     foreach ($property in @{ Context = $Context; NameInput = $nameInput; AppList = $appList; NotesInput = $notesInput; FormatInput = $formatInput; PasswordInput = $passwordInput; ConfirmationInput = $confirmationInput }.GetEnumerator()) {
         $form.Tag | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value
     }
@@ -2495,6 +3804,7 @@ function New-EeaSelectionForm {
 
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    [Windows.Forms.Application]::EnableVisualStyles()
     if ($Mode -eq 'Import') { $Kit = ConvertTo-EeaKit $Kit }
     $form = New-Object Windows.Forms.Form
     $form.Text = switch ($Mode) { Favorites { 'Edge Favorites Bar' } Import { 'Import App Kit: ' + $Kit.Name } Check { 'Check and Repair Apps' } }
@@ -2504,8 +3814,8 @@ function New-EeaSelectionForm {
     $form.MinimumSize = New-Object Drawing.Size(640, 500)
     $form.StartPosition = [Windows.Forms.FormStartPosition]::CenterParent
     $form.Padding = New-Object Windows.Forms.Padding(16)
-    $form.BackColor = [Drawing.SystemColors]::Control
-    $form.ForeColor = [Drawing.SystemColors]::ControlText
+    $form.BackColor = [Drawing.SystemColors]::Window
+    $form.ForeColor = [Drawing.SystemColors]::WindowText
     Set-EeaFormIcon $form
     $layout = New-Object Windows.Forms.TableLayoutPanel
     $layout.Dock = [Windows.Forms.DockStyle]::Fill
@@ -2528,17 +3838,17 @@ function New-EeaSelectionForm {
     $profileInput.AccessibleName = 'Edge profile to read Favorites bar from'
     $profileInput.Visible = $Mode -eq 'Favorites'
     $toolbar.Controls.Add($profileInput)
-    $refresh = New-EeaButton '&Refresh'
-    $all = New-Object Windows.Forms.CheckBox
+    $refresh = New-EeaButton '&Refresh' -Icon Refresh
+    $all = New-EeaCheckBox 'All &available' -Icon SelectAll
     $all.AutoSize = $true
     $all.Text = 'All &available'
     $all.AccessibleName = 'Select all available rows'
-    $desktop = New-Object Windows.Forms.CheckBox
+    $desktop = New-EeaCheckBox '&Desktop' -Icon Desktop
     $desktop.AutoSize = $true
     $desktop.Text = '&Desktop'
     $desktop.Checked = $true
     $desktop.Visible = $Mode -eq 'Favorites'
-    $startMenu = New-Object Windows.Forms.CheckBox
+    $startMenu = New-EeaCheckBox 'Start &menu' -Icon Start
     $startMenu.AutoSize = $true
     $startMenu.Text = 'Start &menu'
     $startMenu.Checked = $true
@@ -2574,14 +3884,14 @@ function New-EeaSelectionForm {
         [void]$grid.Columns.Add($column)
     }
     $layout.Controls.Add($grid, 0, 1)
-    $details = New-Object Windows.Forms.TextBox
+    $details = New-EeaTextBox
     $details.Multiline = $true
     $details.ReadOnly = $true
     $details.ScrollBars = [Windows.Forms.ScrollBars]::Both
     $details.Dock = [Windows.Forms.DockStyle]::Fill
     $details.AccessibleName = 'Selected website details and plain-text helper notes'
     $layout.Controls.Add($details, 0, 2)
-    $status = New-Object Windows.Forms.Label
+    $status = New-EeaLabel -Icon Info
     $status.AutoSize = $true
     $status.Dock = [Windows.Forms.DockStyle]::Fill
     $status.AccessibleName = 'Status'
@@ -2591,9 +3901,11 @@ function New-EeaSelectionForm {
     $actions.AutoSize = $true
     $actions.Dock = [Windows.Forms.DockStyle]::Fill
     $applyText = switch ($Mode) { Favorites { '&Add Selected' } Import { '&Import Selected' } Check { '&Repair Selected' } }
-    $apply = New-EeaButton $applyText
+    $applyIcon = switch ($Mode) { Favorites { 'Add' } Import { 'Import' } Check { 'Repair' } }
+    $apply = New-EeaButton $applyText -Icon $applyIcon
+    Set-EeaPrimaryButton $apply
     $apply.Enabled = $false
-    $close = New-EeaButton '&Close'
+    $close = New-EeaButton '&Close' -Icon Close
     $close.DialogResult = [Windows.Forms.DialogResult]::Cancel
     $actions.Controls.AddRange([Windows.Forms.Control[]]@($apply, $close))
     $layout.Controls.Add($actions, 0, 4)
@@ -2674,20 +3986,33 @@ function New-EeaSelectionForm {
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     try {
+        if ($Help -or $Action -eq '--help') {
+            Get-Help -Name $PSCommandPath -Full
+            exit 0
+        }
         if ($env:OS -ne 'Windows_NT') { throw 'Easy Edge Apps needs Windows and Microsoft Edge.' }
         if (-not $PSBoundParameters.ContainsKey('Action') -and $Name -and $Url) { $Action = 'Install' }
         $actionOptions = @{
             Setup = @('EdgeUserDataPath'); Install = @('Name', 'Url', 'IconPath', 'Notes', 'NoDesktop', 'NoStartMenu', 'Launch')
             List = @(); Remove = @('Name'); Open = @('Name')
             ExportKit = @('Path', 'KitName', 'Notes', 'AppNames', 'Protected', 'Password', 'PasswordConfirmation', 'Replace')
-            ImportKit = @('Path', 'Password', 'Preview'); Check = @('Name', 'AppNames'); Repair = @('Name', 'AppNames', 'Preview')
+            ImportKit = @('Path', 'AppNames', 'Password', 'Preview'); Check = @('Name', 'AppNames'); Repair = @('Name', 'AppNames', 'Preview')
             ListFavorites = @('EdgeProfile', 'EdgeUserDataPath'); ImportFavorites = @('EdgeProfile', 'EdgeUserDataPath', 'AppNames', 'NoDesktop', 'NoStartMenu', 'Preview')
         }
-        $commonOptions = @('Action', 'Quiet', 'WhatIf', 'Confirm', 'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ProgressAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable')
+        $commonOptions = @('Action', 'Unattended', 'Quiet', 'Help', 'WhatIf', 'Confirm', 'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ProgressAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable')
         foreach ($option in $PSBoundParameters.Keys) {
             if ($option -notin $commonOptions -and $option -notin $actionOptions[$Action]) { throw "-$option is not supported with -Action $Action." }
         }
         if ($Name -and $AppNames) { throw 'Choose either -Name or -AppNames, not both.' }
+        if ($Unattended) {
+            if ($Action -eq 'Setup') { throw 'Choose a command-line -Action when using -Unattended.' }
+            if ($PSBoundParameters.ContainsKey('Confirm') -and $PSBoundParameters['Confirm']) { throw 'Do not combine -Unattended with -Confirm. Use -WhatIf to preview changes.' }
+            $ConfirmPreference = 'None'
+            $Quiet = $true
+            if ($WarningPreference -eq 'Inquire') { $WarningPreference = 'Continue' }
+            if ($DebugPreference -eq 'Inquire') { $DebugPreference = 'Continue' }
+            if ($InformationPreference -eq 'Inquire') { $InformationPreference = 'Continue' }
+        }
         switch ($Action) {
             'Setup' {
                 if ($Quiet -or $Name -or $Url -or $IconPath -or $NoDesktop -or $NoStartMenu -or $Launch) {
@@ -2708,6 +4033,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $installedApp = Install-EeaApp @installOptions
                 if ($null -ne $installedApp) {
                     if (-not $Quiet) { Write-Host ('Saved website shortcuts: ' + $installedApp.Name) }
+                    if ($Unattended) { $installedApp | Select-Object Name, Url, Desktop, StartMenu }
                     if ($Launch) { Start-EeaApp -AppName $installedApp.Name }
                 }
             }
@@ -2729,10 +4055,17 @@ if ($MyInvocation.InvocationName -ne '.') {
             'ImportKit' {
                 if (-not $Path) { throw 'Provide -Path to an App Kit.' }
                 $kit = Read-EeaKit -Path $Path -Password $Password
+                if ($AppNames) {
+                    $selectedIds = @($AppNames | ForEach-Object { Get-EeaId $_ })
+                    foreach ($selectedId in $selectedIds) {
+                        if (@($kit.Apps | Where-Object { (Get-EeaId $_.Name) -ceq $selectedId }).Count -ne 1) { throw 'A selected website is not in the App Kit. Review -Action ImportKit -Preview.' }
+                    }
+                    $kit.Apps = @($kit.Apps | Where-Object { $selectedIds -ccontains (Get-EeaId $_.Name) })
+                }
                 $kitPreview = @(Get-EeaKitPreview -Kit $kit)
                 if ($Preview) { $kitPreview | Select-Object Name, Action, CurrentUrl, Url, DomainChanged, Detail }
                 else {
-                    $kitPreview | Format-Table Name, Action, CurrentUrl, Url, DomainChanged, Detail -Wrap | Out-Host
+                    if (-not $Quiet) { $kitPreview | Format-Table Name, Action, CurrentUrl, Url, DomainChanged, Detail -Wrap | Out-Host }
                     $result = Import-EeaKit -Kit $kit -ExpectedPreview $kitPreview
                     $result.Results
                     if (@($result.Results | Where-Object { $_.Status -in @('Failed', 'Conflict', 'Not attempted') }).Count -gt 0) { exit 1 }
@@ -2748,7 +4081,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $checks = @(Get-EeaChecks -AppNames $selectedNames)
                 if ($Preview) { $checks | Select-Object Name, Status, CanRepair, Issues }
                 else {
-                    $checks | Format-Table Name, Status, Issues -Wrap | Out-Host
+                    if (-not $Quiet) { $checks | Format-Table Name, Status, Issues -Wrap | Out-Host }
                     $result = Repair-EeaApps -AppNames $selectedNames -ExpectedChecks $checks
                     $result.Results
                     if (@($result.Results | Where-Object { $_.Status -in @('Failed', 'Conflict', 'Not attempted', 'Not repaired') }).Count -gt 0) { exit 1 }
@@ -2779,7 +4112,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                     $kitPreview = @(Get-EeaKitPreview -Kit $kit -NewOnly)
                     if ($Preview) { $kitPreview | Select-Object Name, Action, Url, Detail }
                     else {
-                        $kitPreview | Format-Table Name, Action, Url, Detail -Wrap | Out-Host
+                        if (-not $Quiet) { $kitPreview | Format-Table Name, Action, Url, Detail -Wrap | Out-Host }
                         $result = Import-EeaKit -Kit $kit -ExpectedPreview $kitPreview -NewOnly
                         $result.Results
                         if (@($result.Results | Where-Object { $_.Status -in @('Failed', 'Conflict', 'Not attempted') }).Count -gt 0) { exit 1 }
@@ -2787,9 +4120,10 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
             }
         }
+        if ($Unattended) { exit 0 }
     }
     catch {
-        if ($Action -eq 'Setup' -and -not $Quiet -and -not $WhatIfPreference) {
+        if ($Action -eq 'Setup' -and -not $Unattended -and -not $Quiet -and -not $WhatIfPreference) {
             try {
                 Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
                 [void][Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Easy Edge Apps', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Warning)

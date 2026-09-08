@@ -15,18 +15,28 @@ Do not include credentials, tokens, personal website addresses, account screensh
 - Only run a reviewed copy obtained from the official repository or its releases. The PowerShell script is unsigned.
 - Installation is current-user only and intentionally requires no administrator elevation.
 - Only HTTPS URLs are accepted. Passwords and browser flags cannot be supplied as launch options.
-- No remote code, external icons, or dependencies are downloaded by setup.
+- No remote code or dependencies are downloaded by setup. Website icon retrieval, introduced in version 1.2.0, is an explicit, optional HTTPS operation.
 - URLs are stored locally, including any query strings or fragments. Never configure a URL containing a secret.
 - Saved metadata is validated; persistent paths do not control writes or deletion. Existing artifacts are checked before replacement or removal.
 - Ownership checks are accident-prevention measures, not a sandbox against another process running as the same user, an administrator, or a compromised browser.
 - Browser security, profile selection, cookies, and credentials remain in Edge's control. An app window is not kiosk isolation.
 - Multi-file changes support caught-error rollback, not guaranteed power-failure atomicity. Preserve recovery files when setup requests help.
 
+## Website icon retrieval
+
+**Get icon** sends HTTPS GET requests to the typed website and its declared icon or redirect destinations. It uses normal certificate validation, no browser session, no cookies, no default Windows or proxy credentials, and no authorization or referrer header. There is no third-party favicon lookup service. Hosts and system proxies can still observe these requests; the requested path and query are sent to their destination. Use trusted sites and never enter addresses containing secrets. A website can direct requests to other HTTPS hosts reachable from this computer; icon lookup is not a network-isolation boundary.
+
+Nothing is requested automatically while typing, starting setup, checking apps, or importing a kit. Network responses remain in memory. Page bodies are bounded to 512 KiB and icon bodies to 1 MiB, including streamed and decompressed data. Each resource allows at most three redirects and has an 8-second cancellation deadline within a 20-second overall lookup deadline. Redirects must remain HTTPS without embedded credentials. The HTML scan extracts bounded icon link metadata without a browser or script execution; unsupported SVG and other active formats are not decoded.
+
+ICO directory dimensions and offsets, PNG dimensions (at most 1024 by 1024), and native image decoding are validated before converting to a bounded 128-pixel Windows bitmap icon. The existing ICO validator runs again before preview and installation. Native .NET image decoding remains an attack surface, so keep Windows and .NET patched. Downloaded bytes are not saved until the user explicitly adds or saves the website. Cancellation, failure, or a changed editor discards pending results without replacing the saved icon. The image becomes an ordinary custom icon in settings and App Kits; there is no automatic refresh or saved remote-icon dependency.
+
 ## App Kit boundaries
 
 Kits are versioned, bounded, data-only JSON. Exact allowlisted fields and types, normalized unique names, HTTPS URLs, placement flags, helper notes, and bounded decoded icons are validated before installation. Imported paths and commands are never accepted. Existing files must pass the original ownership and safe-path checks. Read-only Edge discovery does not migrate history, cookies, saved passwords, or credentials.
 
 Read-only previews and Check Apps do not test websites or make repairs. Application needs separate approval. A fresh snapshot is checked before applying an approved import or repair. Conflicting or modified files and pending recovery fail closed. The current-user/current-session mutex serializes cooperating changes in that session, not other sessions or hostile processes. Multiple apps are not a single atomic transaction; earlier successful apps remain after a later failure.
+
+For command-line automation, `-Unattended` explicitly approves the requested operation, including destination changes in a trusted kit. It suppresses confirmation and setup dialogs, not validation or ownership protections. It does not implicitly authorize replacing an export file. Review inputs before unattended use and use `-Preview` or `-WhatIf` for dry runs. An automation caller can load a `SecureString` from its own secret store; the tool does not load or persist that store. Caller-managed Windows DPAPI password files are account/computer-bound and are separate from portable App Kits.
 
 ## Encrypted exports
 
