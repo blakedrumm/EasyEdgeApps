@@ -61,17 +61,24 @@ try {
     Assert-Taskbar ($supportsPinRequests -is [bool]) 'Pin capability detection must return a Boolean without requesting a pin.'
     if ($supportsPinRequests) {
         $pinClientType = $taskbarType.GetNestedType('PinClient')
-        $pinClient = [Activator]::CreateInstance($pinClientType)
-        $pinCheck = $null
-        try {
-            Assert-Taskbar ($pinClient.IsPinningAllowed -is [bool]) 'The Windows pin-eligibility contract must be callable.'
-            $pinCheck = $pinClient.CheckPinned()
-            $deadline = [DateTime]::UtcNow.AddSeconds(10)
-            while (-not $pinCheck.IsCompleted -and [DateTime]::UtcNow -lt $deadline) { [Windows.Forms.Application]::DoEvents() }
-            Assert-Taskbar ($pinCheck.IsCompleted -and $pinCheck.Result -is [bool]) 'The read-only Windows pinned-state operation must complete.'
+        $pinClient = $null
+        try { $pinClient = [Activator]::CreateInstance($pinClientType) }
+        catch {
+            if ($_.Exception.GetBaseException().HResult -ne -2147024891) { throw }
+            Write-Host 'SKIP: This Windows session denies taskbar-manager activation (E_ACCESSDENIED). Owned shortcut tests and the launcher unavailable-result check still run.'
         }
-        finally { if ($null -ne $pinCheck) { $pinCheck.Dispose() }; $pinClient.Dispose() }
-        Write-Host 'PASS: Native desktop pin capability, eligibility, and asynchronous read-only state checks without a pin request.'
+        if ($null -ne $pinClient) {
+            $pinCheck = $null
+            try {
+                Assert-Taskbar ($pinClient.IsPinningAllowed -is [bool]) 'The Windows pin-eligibility contract must be callable.'
+                $pinCheck = $pinClient.CheckPinned()
+                $deadline = [DateTime]::UtcNow.AddSeconds(10)
+                while (-not $pinCheck.IsCompleted -and [DateTime]::UtcNow -lt $deadline) { [Windows.Forms.Application]::DoEvents() }
+                Assert-Taskbar ($pinCheck.IsCompleted -and $pinCheck.Result -is [bool]) 'The read-only Windows pinned-state operation must complete.'
+            }
+            finally { if ($null -ne $pinCheck) { $pinCheck.Dispose() }; $pinClient.Dispose() }
+            Write-Host 'PASS: Native desktop pin capability, eligibility, and asynchronous read-only state checks without a pin request.'
+        }
     }
     $manifestHash = (Get-FileHash -LiteralPath $paths.Manifest).Hash
     $iconHash = (Get-FileHash -LiteralPath $paths.Icon).Hash
