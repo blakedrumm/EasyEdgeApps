@@ -4,7 +4,11 @@ One PowerShell script that turns trusted websites into easy-to-find Microsoft Ed
 
 A helper sets it up once in the person's Windows account. Everyday use is opening a familiar Desktop or Start menu shortcut, with no PowerShell window, administrator prompt, or extra launcher running in the background.
 
+Set up someone's everyday websites once. Restore and maintain that familiar setup whenever they need help.
+
 [Download the script](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps.ps1) | [Latest release](https://github.com/blakedrumm/EasyEdgeApps/releases/latest) | [Automated checks](https://github.com/blakedrumm/EasyEdgeApps/actions/workflows/test.yml)
+
+**Version 1.1.0:** Includes App Kits, optional password-protected exports, Favorites import, helper notes, and Check and Repair. Encrypted exports are experimental and require independent security review before production use. See the [release notes](docs/releases/v1.1.0.md).
 
 ## Setup for a family member
 
@@ -45,6 +49,56 @@ Names identify apps and are case-insensitive. To rename one, add the new name, c
 
 Do not edit the managed shortcut, saved icon, or settings by hand. Setup refuses to replace or remove an existing shortcut whose ownership fields do not match. Move an unrelated conflicting shortcut out of the way yourself, or choose a different name; there is deliberately no force-overwrite option.
 
+## Gather the Edge Favorites bar
+
+Select **Edge Favorites bar...**, choose the intended local Edge profile, and review the list. It includes websites inside nested Favorites bar folders, with their folder context. Other favorites folders, history, cookies, credentials, and cloud-only items are not imported.
+
+Select individual available rows or **All available**, choose Desktop and Start menu placement, then select **Add Selected** and approve. Up to 100 websites can be added per operation. For a larger bar, add a smaller selection, refresh, and continue.
+
+Only valid HTTPS websites can be selected. HTTP, browser-internal pages, executable schemes, malformed links, and addresses with embedded credentials remain unavailable with a reason. The tool does not silently upgrade HTTP addresses. Existing canonical URLs and duplicate links are marked unavailable; colliding shortcut names get a numbered alternative in the preview. Existing apps are never updated by Favorites import.
+
+Only locally present Stable Edge `Default` and `Profile <number>` profiles are offered. Friendly profile names and the last-used hint come from Local State when readable. Let Edge finish its normal sync if expected items are missing, then select **Refresh**. This is a read-only snapshot of the local Favorites bar: the tool never writes browser files, forces sync, closes Edge, or changes favorites. Choosing a profile here does not force that profile when shortcuts launch.
+
+## Portable App Kits
+
+An App Kit is one named `.eeakit.json` file containing selected website names, HTTPS addresses, Desktop/Start menu choices, optional plain-text helper notes, and portable icons. Generated icons are recreated locally; custom icons are embedded as validated bytes. No installed paths, browser data, credentials, browser flags, commands, or original icon-file dependencies are included.
+
+### Family or replacement-PC workflow
+
+1. Configure and test the websites in the family member's Windows account. Optional **Helper notes** stay with each saved app; never put passwords or recovery codes there.
+2. Select **Export App Kit...**. Choose a name, websites, optional kit notes, and either readable standard JSON or password protection. The window explains which data the file exposes.
+3. For a protected export, enter and confirm a strong unique passphrase of at least 12 characters. Save the kit privately; share its password separately. A forgotten password cannot be recovered.
+4. On the replacement computer, sign in as the intended Windows user and run the same reviewed script. Select **Import App Kit...** and the kit file. Protected kits unlock only in memory.
+5. Review additions, updates, unchanged apps, conflicts, helper notes, and exact old/new URLs. Destination-domain changes are explicitly flagged. Select the changes to apply, then approve **Import Selected**.
+6. Open the resulting shortcuts and test the real websites with the person. Website accounts and sign-in sessions do not move with the kit.
+
+Repeated imports do not duplicate apps. Apps absent from the kit stay installed. The whole selected payload is validated before any installation writes; conflicts are not force-overwritten. The GUI can exclude conflicts from a selected batch. The CLI applies the whole kit and stops preflight if any app conflicts.
+
+Changes use the existing per-app staging, ownership, locking, and rollback protections. A kit is **not one atomic transaction**: if a later app fails, earlier completed apps remain. Results identify added, updated, unchanged, failed, and not-attempted apps. Refresh the preview after resolving the cause.
+
+### Password protection and privacy
+
+The entire payload, including kit name, notes, app metadata, URLs, and custom icons, is encrypted. The outer file still reveals its format, algorithm, KDF settings, salt, IV, ciphertext length, and authentication tag. The filename is not encrypted; choose a non-sensitive one.
+
+The portable format uses platform PBKDF2-HMAC-SHA256 (600,000 iterations) and the RFC 7518 A256CBC-HS512 authenticated-encryption construction. Both Windows PowerShell 5.1 and PowerShell 7 use the same format; it is not tied to a Windows account. See the [format and cryptographic specification](docs/App-Kit-Format.md) and [security boundaries](SECURITY.md).
+
+Password protection applies **only to the exported file**. Installed settings, shortcuts, icons, recovery data, and readable exports are not encrypted. Browser sessions and normal network visibility are unchanged. Weak passwords can be guessed offline, authentication does not prove the sender's identity, and managed-memory cleanup is best-effort. No passwords or derived keys are saved. There is no silent plaintext fallback. Treat encryption as awaiting independent review, not as a production-security guarantee.
+
+## Check and Repair
+
+Select **Check Apps...** for read-only diagnostics. Select repairable rows and **Repair Selected** to review and approve repairs. The main window keeps Check Apps accessible even when saved settings are damaged.
+
+| Status | Meaning |
+| --- | --- |
+| Healthy | Owned local files match saved settings; the website was not tested |
+| Repairable | A shortcut or icon is missing, or owned shortcuts need the currently discovered Edge executable |
+| Conflict | Settings or owned artifacts are damaged, modified, ambiguous, or occupied by unrelated files |
+| Blocked | Edge is unavailable, a path is unsafe/unreadable, or pending recovery needs attention |
+
+Repair recreates only verified owned artifacts at safely unoccupied destinations. A missing custom icon becomes an automatic letter icon unless restored from a trusted kit. Modified or undecodable existing icons and shortcuts are conflicts, not permission to overwrite. If files change after the check, a fresh check is required. Pending recovery and unknown files are preserved.
+
+Repair does not probe private URLs, sign in, repair accounts, bypass permissions, or diagnose outages. A repaired shortcut is not proof that the website works.
+
 ## Command-line use
 
 Windows PowerShell 5.1 is built into Windows 11. PowerShell 7 on Windows is also supported. No modules need to be installed.
@@ -71,6 +125,58 @@ Windows PowerShell 5.1 is built into Windows 11. PowerShell 7 on Windows is also
 `-NoStartMenu` omits the Start menu shortcut. At least one location must be selected. `-Quiet` suppresses routine command-line install/remove messages, not errors or safety warnings. Command-line operations do not show setup dialogs. Failures return exit code 1. Use `-Quiet` with an explicit command-line action, not the default setup action.
 
 `-Name` and `-Url` together imply `-Action Install` when no action is supplied. Website addresses must be absolute HTTPS URLs. Arbitrary Edge switches, embedded credentials, HTTP, and executable URL schemes are intentionally unsupported. Query strings and fragments are preserved for sites that depend on them.
+
+### Favorites and maintenance commands
+
+```powershell
+.\EasyEdgeApps.ps1 -Action ListFavorites -EdgeProfile 'Default'
+.\EasyEdgeApps.ps1 -Action ImportFavorites -EdgeProfile 'Default' -Preview
+.\EasyEdgeApps.ps1 -Action ImportFavorites -EdgeProfile 'Default' -AppNames 'My News', 'My Mail' -WhatIf
+.\EasyEdgeApps.ps1 -Action ImportFavorites -EdgeProfile 'Default' -AppNames 'My News', 'My Mail'
+
+.\EasyEdgeApps.ps1 -Action Check
+.\EasyEdgeApps.ps1 -Action Repair -Name 'My News' -Preview
+.\EasyEdgeApps.ps1 -Action Repair -AppNames 'My News', 'My Mail' -WhatIf
+.\EasyEdgeApps.ps1 -Action Repair -AppNames 'My News', 'My Mail'
+```
+
+Use proposed `Name` values from `ListFavorites` for selection, not the original unsanitized title. Without `-EdgeProfile`, listing includes all discovered profiles; import chooses the last-used one when known, otherwise the first. Specify a profile for predictable automation. `-EdgeUserDataPath` selects another local Edge User Data root for discovery, not an installation destination. It is also accepted by `Setup`.
+
+### App Kit commands
+
+```powershell
+.\EasyEdgeApps.ps1 -Action ExportKit -KitName 'Family websites' -AppNames 'My News', 'My Mail' -Notes 'Call the helper for setup changes.' -Path '.\Family.eeakit.json'
+.\EasyEdgeApps.ps1 -Action ImportKit -Path '.\Family.eeakit.json' -Preview
+.\EasyEdgeApps.ps1 -Action ImportKit -Path '.\Family.eeakit.json' -WhatIf
+.\EasyEdgeApps.ps1 -Action ImportKit -Path '.\Family.eeakit.json'
+```
+
+Export defaults to all saved apps when `-AppNames` is omitted. At least one and at most 100 apps are allowed. Export requires an existing parent folder and a filename ending `.eeakit.json`; an existing destination requires explicit `-Replace`. GUI file selection also asks before replacement. Failed or stale replacements preserve the previous file where the filesystem supports atomic replacement.
+
+Ask for passwords explicitly in an interactive helper session, never as command-line literals or environment variables:
+
+```powershell
+$kitPassword = Read-Host 'Strong export passphrase' -AsSecureString
+$confirmation = Read-Host 'Repeat export passphrase' -AsSecureString
+try {
+	.\EasyEdgeApps.ps1 -Action ExportKit -Path '.\Private.eeakit.json' -Protected -Password $kitPassword -PasswordConfirmation $confirmation
+}
+finally {
+	$kitPassword.Dispose()
+	$confirmation.Dispose()
+}
+
+$kitPassword = Read-Host 'App Kit password' -AsSecureString
+try {
+	.\EasyEdgeApps.ps1 -Action ImportKit -Path '.\Private.eeakit.json' -Password $kitPassword -Preview
+	.\EasyEdgeApps.ps1 -Action ImportKit -Path '.\Private.eeakit.json' -Password $kitPassword
+}
+finally { $kitPassword.Dispose() }
+```
+
+The script accepts `SecureString` parameters; it never unexpectedly opens a password prompt. A missing password fails promptly, including under `-NonInteractive`. `-Preview` lists data without applying it; `-WhatIf` describes writes without performing them. An encrypted import still needs to unlock before showing a meaningful preview. Protected export `-WhatIf` does not ask for passwords or create staging.
+
+Import, export, and repair request confirmation by default. In reviewed automation, `-Confirm:$false` is explicit approval. Noninteractive use without required approval fails rather than waiting. Wrong passwords, unsupported parameters, conflicts, and failed/partial applications return exit code 1. A declined action or `-WhatIf` leaves files unchanged and returns normally. `Check` reports findings as structured data; a completed check is not an installation success claim. Outputs and previews can contain private names and URLs, so do not publish transcripts.
 
 ## What it does not do
 
@@ -121,7 +227,18 @@ pwsh.exe -NoProfile -STA -File .\tests\Test-EasyEdgeApps.ps1
 pwsh.exe -NoProfile -STA -File .\tests\Test-EasyEdgeAppsGui.ps1
 ```
 
-Local verification was performed without elevation on Windows 11 Enterprise build **26200**, using Windows PowerShell **5.1.26100.8875** and PowerShell **7.6.5**. The automated Windows workflow runs both suites in both hosts. Enlarged-font layout tests and rendered-icon pixel checks are included; they do not replace physical high-DPI, high-contrast, Narrator, multi-monitor, or real-site testing with the intended user.
+Run all isolated suites and parser checks for the current host, or both installed hosts:
+
+```powershell
+.\tests\Invoke-Tests.ps1
+.\tests\Invoke-Tests.ps1 -BothHosts -ScreenshotDirectory "$env:TEMP\EasyEdgeApps-captures"
+```
+
+The nine suites cover the existing core, JSON portability, Favorites discovery/import, App Kits and repair, RFC cryptographic known-answer tests, encrypted files and bidirectional host interoperability, public CLI binding/dispatch, and both native GUI surfaces. The CLI harness extracts the unchanged public parameter block and dispatcher using PowerShell's AST and redirects only known-folder dependencies into temporary storage. It never redirects your actual Windows folders. Interoperability tests require both `powershell.exe` and `pwsh.exe`.
+
+Local verification uses Windows 11 Enterprise build **26200**, Windows PowerShell **5.1.26100.8875**, and PowerShell **7.6.5**, without elevation. The Windows workflow invokes the same runner in each host. Enlarged-font layout tests cap windows to 1024 by 768 and include rendered-icon pixel checks. They do not replace physical high-DPI, high-contrast, Narrator, multi-monitor, or real-site testing with the intended user.
+
+Before handing over this version, exercise a protected-kit transfer between two real Windows accounts/computers, the intended Edge profile's Favorites selection, recovery/file-lock behavior, and any OneDrive or network-backed destination. Review the custom crypto composition independently before using encrypted exports for sensitive production data. Private `.eeakit.json` files are ignored by Git; never force-add real kits, passwords, or browser fixtures.
 
 A separate disposable-profile launch probe with Edge **152.0.4191.66** did not expose a visible app window in the automation session. That probe was inconclusive, not an end-to-end browser pass. Opening the actual websites from the created shortcuts on the intended computer is a required helper acceptance check before handover.
 

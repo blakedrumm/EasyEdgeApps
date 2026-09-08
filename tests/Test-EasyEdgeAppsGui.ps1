@@ -70,9 +70,11 @@ try {
     Assert-Gui ($null -ne $form.AcceptButton -and $null -ne $form.CancelButton) 'Enter and Escape need default actions.'
     $ui.NameInput.Text = 'My News'
     $ui.UrlInput.Text = 'https://example.com/#/home'
+    $ui.NotesInput.Text = 'Plain-text helper notes.'
     $ui.SaveButton.PerformClick()
     Assert-Gui ($ui.StatusLabel.Text -eq 'Saved: My News') 'The Add website button must complete installation.'
     Assert-Gui ($ui.AppList.Items.Count -eq 1) 'The saved website must appear in the list.'
+    Assert-Gui ((Read-EeaManifest $context 'My News').Notes -ceq 'Plain-text helper notes.') 'Helper notes must be saved through the normal editor.'
     Assert-Gui ($ui.AppList.GetItemText($ui.AppList.Items[0]) -eq 'My News') 'Website list must show the friendly name.'
     Assert-Gui ($ui.NameInput.ReadOnly -and $ui.OpenButton.Enabled -and $ui.RemoveButton.Enabled) 'Selection must enable the correct actions.'
     Assert-Gui ($null -ne $ui.IconPreview.Image) 'A generated icon must render in the setup window.'
@@ -92,11 +94,15 @@ try {
         $form.PerformLayout()
         [Windows.Forms.Application]::DoEvents()
         Assert-ControlLayout $form
-        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
             $ui.EditorViewport.ScrollControlIntoView($requiredControl)
             [Windows.Forms.Application]::DoEvents()
             $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
             Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($controlBounds)) ('Required control must be reachable: ' + $requiredControl.Text)
+        }
+        foreach ($toolButton in @($ui.ExportButton, $ui.ImportButton, $ui.FavoritesButton, $ui.CheckButton, $ui.CloseButton)) {
+            $buttonBounds = $form.RectangleToClient($toolButton.RectangleToScreen($toolButton.ClientRectangle))
+            Assert-Gui ($form.ClientRectangle.Contains($buttonBounds)) ('Tool command must be visible: ' + $toolButton.Text)
         }
         if ($ScreenshotDirectory) {
             [void][IO.Directory]::CreateDirectory($ScreenshotDirectory)

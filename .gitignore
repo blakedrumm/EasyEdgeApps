@@ -4,6 +4,7 @@
 *.ico
 *.log
 *.tmp
+*.eeakit.json
 .pending/
 TestResults/
 SHA256SUMS.txt
