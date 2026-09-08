@@ -1,3 +1,7 @@
+<p align="center">
+	<img src="docs/images/logo.png" alt="Easy Edge Apps logo" width="360">
+</p>
+
 # Easy Edge Apps
 
 One PowerShell script that turns trusted websites into easy-to-find Microsoft Edge app-window shortcuts on Windows 11.
@@ -38,6 +42,7 @@ Use ordinary site addresses, not password-reset links, one-time sign-in links, o
 - A distinctive, locally generated letter icon, or an optional existing `.ico` file. No third-party icon services or downloads.
 - Existing Edge profile behavior, website sign-ins, and browser security remain in Edge's control. No separate browser profile is created or forcibly selected.
 - Setup uses native Windows controls, keyboard navigation, accessible names, system colors, and a resizable layout. Destructive confirmation defaults to **No**.
+- The application logo is embedded in the script for the setup header and window icons; no image file or download is needed at runtime. The current source includes this branding update; the existing v1.1.0 asset is unchanged.
 
 The intended setup operator is a helper. The person using the shortcuts does not need to manage PowerShell.
 
@@ -217,6 +222,8 @@ If setup reports that an earlier change needs recovery, stop making changes and 
 A `complete.txt` file containing `EasyEdgeApps:complete:1` means the operation completed or was successfully rolled back, but Windows temporarily prevented cleanup. Saved websites remain usable. The next change retries cleanup; do not disable antivirus to clear a file lock.
 
 ## Verification and development
+
+To regenerate the embedded application icon from [the source artwork](docs/images/app-icon.png), run `pwsh.exe -NoProfile -File .\tools\Update-BrandIcon.ps1`. The generator updates only the icon data in the script. End users do not need the source image or the generator.
 
 The test scripts need no test framework or external packages. They write to uniquely named temporary folders, not your actual Desktop or Start menu. Core tests use real Windows shortcut COM objects; the GUI smoke test exercises native controls offscreen.
 

@@ -45,6 +45,7 @@ function New-ToolTestContext {
 function Show-ToolTestForm {
     param($Form)
     $forms.Add($Form)
+    Assert-ToolGui ($null -ne $Form.Icon -and $Form.Icon.Width -eq 64) 'Every application dialog must use the embedded logo icon.'
     $Form.StartPosition = [Windows.Forms.FormStartPosition]::Manual
     $Form.Location = New-Object Drawing.Point(-10000, -10000)
     $Form.ShowInTaskbar = $false

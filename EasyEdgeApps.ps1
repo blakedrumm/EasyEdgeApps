@@ -1685,6 +1685,39 @@ function Write-EeaKit {
     }
 }
 
+function Get-EeaBrandIcon {
+    [CmdletBinding()]
+    param()
+
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    $encodedIcon = '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'
+    $compressed = New-Object IO.MemoryStream(,[Convert]::FromBase64String($encodedIcon))
+    $decompressor = New-Object IO.Compression.GZipStream($compressed, [IO.Compression.CompressionMode]::Decompress)
+    $iconStream = New-Object IO.MemoryStream
+    $icon = $null
+    try {
+        $decompressor.CopyTo($iconStream)
+        if ($iconStream.Length -ne 16958) { throw 'The embedded application icon is invalid.' }
+        $iconStream.Position = 0
+        $icon = New-Object Drawing.Icon($iconStream)
+        return $icon.Clone()
+    }
+    finally {
+        if ($null -ne $icon) { $icon.Dispose() }
+        $iconStream.Dispose()
+        $decompressor.Dispose()
+        $compressed.Dispose()
+    }
+}
+
+function Set-EeaFormIcon {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $Form.Icon = Get-EeaBrandIcon
+    $Form.Add_Disposed({ param($Sender, $EventArgs) if ($null -ne $Sender.Icon) { $Sender.Icon.Dispose() } })
+}
+
 function Get-EeaIconPreview {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -1791,7 +1824,7 @@ function New-EeaSetupForm {
     $form.StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
     $form.BackColor = [Drawing.SystemColors]::Control
     $form.ForeColor = [Drawing.SystemColors]::ControlText
-    $form.Icon = [Drawing.SystemIcons]::Application
+    Set-EeaFormIcon $form
     $form.Padding = New-Object Windows.Forms.Padding(20)
 
     $layout = New-Object Windows.Forms.TableLayoutPanel
@@ -1805,12 +1838,33 @@ function New-EeaSetupForm {
     [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     $form.Controls.Add($layout)
 
+    $headingLayout = New-Object Windows.Forms.TableLayoutPanel
+    $headingLayout.Dock = [Windows.Forms.DockStyle]::Fill
+    $headingLayout.AutoSize = $true
+    $headingLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $headingLayout.Margin = New-Object Windows.Forms.Padding(0)
+    $headingLayout.ColumnCount = 2
+    $headingLayout.RowCount = 1
+    [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Absolute, 48)))
+    [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
+    [void]$headingLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
+    $brandPicture = New-Object Windows.Forms.PictureBox
+    $brandPicture.Size = New-Object Drawing.Size(32, 32)
+    $brandPicture.Anchor = [Windows.Forms.AnchorStyles]::Left
+    $brandPicture.SizeMode = [Windows.Forms.PictureBoxSizeMode]::Zoom
+    $brandPicture.Image = $form.Icon.ToBitmap()
+    $brandPicture.AccessibleName = 'Easy Edge Apps logo'
+    $brandPicture.TabStop = $false
+    $brandPicture.Margin = New-Object Windows.Forms.Padding(0, 0, 12, 16)
+    $headingLayout.Controls.Add($brandPicture, 0, 0)
     $heading = New-Object Windows.Forms.Label
     $heading.Text = 'Easy Edge Apps'
     $heading.Font = New-Object Drawing.Font('Segoe UI', 20, [Drawing.FontStyle]::Bold)
     $heading.AutoSize = $true
+    $heading.Anchor = [Windows.Forms.AnchorStyles]::Left
     $heading.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 16)
-    $layout.Controls.Add($heading, 0, 0)
+    $headingLayout.Controls.Add($heading, 1, 0)
+    $layout.Controls.Add($headingLayout, 0, 0)
 
     $content = New-Object Windows.Forms.TableLayoutPanel
     $content.Dock = [Windows.Forms.DockStyle]::Fill
@@ -1978,7 +2032,7 @@ function New-EeaSetupForm {
         IconPreview = $iconPreview; IconLabel = $iconLabel; StatusLabel = $statusLabel
         SaveButton = $saveButton; OpenButton = $openButton; RemoveButton = $removeButton
         NewButton = $newButton; CloseButton = $closeButton
-        EditorViewport = $editorViewport
+        EditorViewport = $editorViewport; BrandPicture = $brandPicture
         ExportButton = $exportButton; ImportButton = $importButton; FavoritesButton = $favoritesButton; CheckButton = $checkButton
         EdgeUserDataPath = $EdgeUserDataPath
     }
@@ -2075,6 +2129,7 @@ function New-EeaSetupForm {
     $form.Add_FormClosed({
         param($Sender, $EventArgs)
         if ($null -ne $Sender.Tag.IconPreview.Image) { $Sender.Tag.IconPreview.Image.Dispose() }
+        if ($null -ne $Sender.Tag.BrandPicture.Image) { $Sender.Tag.BrandPicture.Image.Dispose(); $Sender.Tag.BrandPicture.Image = $null }
     })
     $exportButton.Add_Click({
         param($Sender, $EventArgs)
@@ -2165,6 +2220,7 @@ function New-EeaScrollDialog {
     $form.Padding = New-Object Windows.Forms.Padding(16)
     $form.BackColor = [Drawing.SystemColors]::Control
     $form.ForeColor = [Drawing.SystemColors]::ControlText
+    Set-EeaFormIcon $form
     $layout = New-Object Windows.Forms.TableLayoutPanel
     $layout.Dock = [Windows.Forms.DockStyle]::Fill
     $layout.ColumnCount = 1
@@ -2450,6 +2506,7 @@ function New-EeaSelectionForm {
     $form.Padding = New-Object Windows.Forms.Padding(16)
     $form.BackColor = [Drawing.SystemColors]::Control
     $form.ForeColor = [Drawing.SystemColors]::ControlText
+    Set-EeaFormIcon $form
     $layout = New-Object Windows.Forms.TableLayoutPanel
     $layout.Dock = [Windows.Forms.DockStyle]::Fill
     $layout.ColumnCount = 1

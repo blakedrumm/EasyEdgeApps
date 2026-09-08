@@ -66,6 +66,15 @@ try {
     [Windows.Forms.Application]::DoEvents()
     $ui = $form.Tag
     Assert-Gui ($ui.AppList.Items.Count -eq 0) 'New setup should have no websites.'
+    Assert-Gui ($null -ne $form.Icon -and $form.Icon.Width -eq 64 -and $ui.BrandPicture.Image.Width -eq 64) 'Use the embedded logo for the application icon and header.'
+    $coloredPixels = 0
+    for ($pixelY = 0; $pixelY -lt 64; $pixelY++) {
+        for ($pixelX = 0; $pixelX -lt 64; $pixelX++) {
+            $pixel = $ui.BrandPicture.Image.GetPixel($pixelX, $pixelY)
+            if ($pixel.A -gt 128 -and $pixel.B -gt $pixel.R + 40) { $coloredPixels++ }
+        }
+    }
+    Assert-Gui ($coloredPixels -gt 1000) 'The supplied blue and cyan logo must render visibly, not a blank or fallback icon.'
     Assert-Gui (-not (Test-Path -LiteralPath $context.Root)) 'Opening setup must not create app data.'
     Assert-Gui ($null -ne $form.AcceptButton -and $null -ne $form.CancelButton) 'Enter and Escape need default actions.'
     $ui.NameInput.Text = 'My News'
@@ -94,6 +103,8 @@ try {
         $form.PerformLayout()
         [Windows.Forms.Application]::DoEvents()
         Assert-ControlLayout $form
+        $brandBounds = $form.RectangleToClient($ui.BrandPicture.RectangleToScreen($ui.BrandPicture.ClientRectangle))
+        Assert-Gui ($form.ClientRectangle.Contains($brandBounds)) 'The application logo must stay visible at large text sizes.'
         foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
             $ui.EditorViewport.ScrollControlIntoView($requiredControl)
             [Windows.Forms.Application]::DoEvents()
