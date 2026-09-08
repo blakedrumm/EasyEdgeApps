@@ -3087,6 +3087,14 @@ namespace EasyEdgeApps
         }
     }
 
+    public sealed class SettingsFlowPanel : FlowLayoutPanel
+    {
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            return base.GetPreferredSize(new Size(Math.Max(1, ClientSize.Width), proposedSize.Height));
+        }
+    }
+
     public sealed class LoadingSpinner : Control
     {
         private bool busy;
@@ -4422,6 +4430,76 @@ function Add-EeaDialogField {
     $editor.RowCount += 2
 }
 
+function New-EeaSettingsRow {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Label, [Parameter(Mandatory = $true)]$Control, [string]$Icon = 'Info')
+
+    $row = New-Object Windows.Forms.TableLayoutPanel
+    $row.AutoSize = $true
+    $row.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $row.ColumnCount = 2
+    $row.RowCount = 1
+    [void]$row.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 40)))
+    [void]$row.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 60)))
+    [void]$row.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
+    $caption = New-EeaLabel $Label -Icon $Icon
+    $caption.Anchor = [Windows.Forms.AnchorStyles]::Left
+    $caption.TextAlign = [Drawing.ContentAlignment]::TopLeft
+    $caption.Margin = New-Object Windows.Forms.Padding(0, 4, 12, 4)
+    $caption.TabIndex = 0
+    $Control.AccessibleName = $Label.Replace('&', '')
+    $Control.Dock = [Windows.Forms.DockStyle]::Top
+    $Control.Margin = New-Object Windows.Forms.Padding(0, 4, 0, 4)
+    $Control.TabIndex = 1
+    $row.Controls.Add($caption, 0, 0)
+    $row.Controls.Add($Control, 1, 0)
+    return $row
+}
+
+function Add-EeaSettingsSection {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form, [Parameter(Mandatory = $true)][string]$Title, [Parameter(Mandatory = $true)][object[]]$Controls, [string]$Icon = 'Settings')
+
+    $editor = $Form.Tag.Editor
+    $section = New-Object Windows.Forms.TableLayoutPanel
+    $section.Name = $Title
+    $section.AccessibleName = $Title
+    $section.AutoSize = $true
+    $section.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $section.Dock = [Windows.Forms.DockStyle]::Top
+    $section.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 12)
+    $section.ColumnCount = 1
+    $section.RowCount = $Controls.Count + 1
+    $section.TabIndex = $editor.RowCount
+    [void]$section.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
+    $heading = New-EeaLabel $Title -Icon $Icon
+    $heading.Font = New-Object Drawing.Font($Form.Font, [Drawing.FontStyle]::Bold)
+    $heading.Dock = [Windows.Forms.DockStyle]::Fill
+    $heading.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 6)
+    $heading.TabIndex = 0
+    $Form.Add_FontChanged({
+        param($Sender, $EventArgs)
+        if ($heading.IsDisposed) { return }
+        $previousFont = $heading.Font
+        $heading.Font = New-Object Drawing.Font($Sender.Font, [Drawing.FontStyle]::Bold)
+        $previousFont.Dispose()
+    }.GetNewClosure())
+    $heading.Add_Disposed({ param($Sender, $EventArgs) $Sender.Font.Dispose() })
+    [void]$section.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
+    $section.Controls.Add($heading, 0, 0)
+    for ($controlIndex = 0; $controlIndex -lt $Controls.Count; $controlIndex++) {
+        $control = $Controls[$controlIndex]
+        $control.Dock = [Windows.Forms.DockStyle]::Top
+        $control.Margin = New-Object Windows.Forms.Padding(28, 0, 0, 4)
+        $control.TabIndex = $controlIndex + 1
+        [void]$section.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
+        $section.Controls.Add($control, 0, $controlIndex + 1)
+    }
+    [void]$editor.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
+    $editor.Controls.Add($section, 0, $editor.RowCount)
+    $editor.RowCount++
+}
+
 function New-EeaSettingsForm {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$OwnerForm)
@@ -4430,11 +4508,17 @@ function New-EeaSettingsForm {
     $form = New-EeaScrollDialog -Title 'Settings' -ActionText '&Save settings' -ActionIcon Save
     $form.Tag | Add-Member -NotePropertyName Context -NotePropertyValue $OwnerForm.Tag.Context
     $form.Tag | Add-Member -NotePropertyName SetupForm -NotePropertyValue $OwnerForm
-    $autoCheck = New-EeaCheckBox 'Check automatically once a day' -Icon Refresh
+    $footer = $form.Tag.ApplyButton.Parent
+    $footer.FlowDirection = [Windows.Forms.FlowDirection]::RightToLeft
+    $footer.Controls.SetChildIndex($form.Tag.CloseButton, 0)
+    $form.Tag.StatusLabel.Text = ''
+    $form.Tag.StatusLabel.Visible = $false
+    $form.Tag.StatusLabel.Add_TextChanged({ param($Sender, $EventArgs) $Sender.Visible = -not [string]::IsNullOrWhiteSpace($Sender.Text) })
+    $autoCheck = New-EeaCheckBox 'Check &automatically once a day' -Icon Refresh
     $autoCheck.Checked = $settings.AutomaticUpdateChecks
-    Add-EeaDialogField $form 'Updates' $autoCheck -Icon Refresh
-    $updatePanel = New-Object Windows.Forms.FlowLayoutPanel
+    $updatePanel = New-Object ((Initialize-EeaSpaceBackground) + '.SettingsFlowPanel')
     $updatePanel.AutoSize = $true
+    $updatePanel.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $updateSpinner = New-Object ((Initialize-EeaSpaceBackground) + '.LoadingSpinner')
     $updateSpinner.Margin = New-Object Windows.Forms.Padding(0, 8, 8, 0)
     $checkUpdates = New-EeaButton '&Check for updates' -Icon Refresh
@@ -4444,12 +4528,16 @@ function New-EeaSettingsForm {
     $cancelUpdate.MinimumSize = New-Object Drawing.Size(32, 32)
     $cancelUpdate.Size = New-Object Drawing.Size(32, 32)
     $cancelUpdate.ImageAlign = [Drawing.ContentAlignment]::MiddleCenter
+    $cancelUpdate.Enabled = $false
+    $cancelUpdate.Visible = $false
+    $cancelUpdate.Add_EnabledChanged({ param($Sender, $EventArgs) $Sender.Visible = $Sender.Enabled })
     $downloadUpdate = New-EeaButton '&Download update' -Icon Import
-    $updatePanel.Controls.AddRange([Windows.Forms.Control[]]@($updateSpinner, $checkUpdates, $cancelUpdate, $downloadUpdate))
-    Add-EeaDialogField $form ('Version ' + (Get-EeaVersion).ToString()) $updatePanel -Icon Info
+    $updatePanel.Controls.AddRange([Windows.Forms.Control[]]@($checkUpdates, $downloadUpdate, $cancelUpdate, $updateSpinner))
+    $updateRow = New-EeaSettingsRow -Label ('Version ' + (Get-EeaVersion).ToString()) -Control $updatePanel -Icon Info
     $updateLabel = New-EeaLabel -Icon Info
     $updateLabel.AutoSize = $true
-    Add-EeaDialogField $form 'Update status' $updateLabel -Icon Info
+    $updateLabel.AccessibleName = 'Update status'
+    Add-EeaSettingsSection -Form $form -Title 'Updates' -Icon Refresh -Controls @($updateRow, $updateLabel, $autoCheck)
     $profileInput = New-Object Windows.Forms.ComboBox
     $profileInput.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
     $profileInput.DisplayMember = 'DisplayName'
@@ -4467,35 +4555,44 @@ function New-EeaSettingsForm {
     if ($settings.DefaultEdgeProfile -and $profileInput.SelectedIndex -eq 0) {
         $profileInput.SelectedIndex = $profileInput.Items.Add([pscustomobject]@{ DisplayName = ('Unavailable: ' + $settings.DefaultEdgeProfile); DirectoryName = $settings.DefaultEdgeProfile; Available = $false })
     }
-    Add-EeaDialogField $form 'Edge profile for &new websites' $profileInput -Icon Apps
-    $desktopCheck = New-EeaCheckBox '&Desktop shortcuts' -Icon Desktop
+    $profileRow = New-EeaSettingsRow -Label 'Default Edge &profile' -Control $profileInput -Icon Apps
+    $profileInput.AccessibleDescription = 'Used for new websites. Existing websites keep their saved profile.'
+    $desktopCheck = New-EeaCheckBox '&Desktop' -Icon Desktop
     $desktopCheck.Checked = $settings.DefaultDesktop
-    Add-EeaDialogField $form 'Default placement' $desktopCheck -Icon Desktop
-    $startMenuCheck = New-EeaCheckBox '&Start menu shortcuts' -Icon Start
+    $desktopCheck.Margin = New-Object Windows.Forms.Padding(0, 0, 16, 0)
+    $startMenuCheck = New-EeaCheckBox '&Start menu' -Icon Start
     $startMenuCheck.Checked = $settings.DefaultStartMenu
-    Add-EeaDialogField $form 'Start menu' $startMenuCheck -Icon Start
+    $startMenuCheck.Margin = New-Object Windows.Forms.Padding(0)
+    $placement = New-Object ((Initialize-EeaSpaceBackground) + '.SettingsFlowPanel')
+    $placement.AutoSize = $true
+    $placement.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck))
+    $placementRow = New-EeaSettingsRow -Label 'New shortcuts' -Control $placement -Icon Desktop
+    Add-EeaSettingsSection -Form $form -Title 'Websites' -Icon Link -Controls @($profileRow, $placementRow)
     $motionCheck = New-EeaCheckBox '&Animate the space background' -Icon Motion
     $motionCheck.Checked = $settings.MotionEnabled
-    Add-EeaDialogField $form 'Appearance' $motionCheck -Icon Motion
     $textSize = New-Object Windows.Forms.ComboBox
     $textSize.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $textSize.MaximumSize = New-Object Drawing.Size(96, 0)
     foreach ($pointSize in @(12, 14, 16, 18)) { [void]$textSize.Items.Add($pointSize) }
     $textSize.SelectedItem = $settings.TextSize
-    Add-EeaDialogField $form '&Text size' $textSize -Icon Name
+    $textSizeRow = New-EeaSettingsRow -Label '&Text size' -Control $textSize -Icon Name
+    Add-EeaSettingsSection -Form $form -Title 'Appearance' -Icon Image -Controls @($motionCheck, $textSizeRow)
     $debugCheck = New-EeaCheckBox 'Enable &debug logging' -Icon Notes
     $debugCheck.Checked = $settings.DebugLogging
-    Add-EeaDialogField $form 'Diagnostics' $debugCheck -Icon Notes
-    $logPanel = New-Object Windows.Forms.FlowLayoutPanel
+    $logPanel = New-Object ((Initialize-EeaSpaceBackground) + '.SettingsFlowPanel')
     $logPanel.AutoSize = $true
+    $logPanel.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $openLogs = New-EeaButton '&Open log folder' -Icon Open
     $clearLogs = New-EeaButton 'C&lear logs' -Icon Remove
     $logPanel.Controls.AddRange([Windows.Forms.Control[]]@($openLogs, $clearLogs))
-    Add-EeaDialogField $form 'Diagnostic files' $logPanel -Icon Privacy
+    Add-EeaSettingsSection -Form $form -Title 'Diagnostics' -Icon Privacy -Controls @($debugCheck, $logPanel)
     foreach ($entry in @{
         AutoUpdateCheck = $autoCheck; ProfileInput = $profileInput; DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck
         MotionCheck = $motionCheck; TextSizeInput = $textSize; DebugCheck = $debugCheck
         CheckUpdatesButton = $checkUpdates; CancelUpdateButton = $cancelUpdate; DownloadUpdateButton = $downloadUpdate
         UpdateSpinner = $updateSpinner; UpdateLabel = $updateLabel; OpenLogsButton = $openLogs; ClearLogsButton = $clearLogs
+        SettingsFields = @($checkUpdates, $cancelUpdate, $downloadUpdate, $autoCheck, $profileInput, $desktopCheck, $startMenuCheck, $motionCheck, $textSize, $debugCheck, $openLogs, $clearLogs)
     }.GetEnumerator()) { $form.Tag | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value }
     $OwnerForm.Tag.SettingsDialog = $form
     Update-EeaUpdateControls $OwnerForm

@@ -131,7 +131,8 @@ function Test-ToolFormLayout {
         [Windows.Forms.Application]::DoEvents()
         Assert-ToolControlLayout $Form
         if ($null -ne $Form.Tag.PSObject.Properties['EditorViewport']) {
-            foreach ($control in $Form.Tag.Editor.Controls) {
+            $fields = if ($null -ne $Form.Tag.PSObject.Properties['SettingsFields']) { $Form.Tag.SettingsFields } else { $Form.Tag.Editor.Controls }
+            foreach ($control in $fields) {
                 if (-not $control.CanSelect) { continue }
                 $Form.Tag.EditorViewport.ScrollControlIntoView($control)
                 [Windows.Forms.Application]::DoEvents()
@@ -311,6 +312,16 @@ try {
     Show-ToolTestForm $settingsForm
     Assert-ToolGui ($script:UpdateRequestsStarted -eq 0 -and -not [IO.Directory]::Exists($settingsContext.Root)) 'Opening setup or Settings with default preferences must not write files or contact GitHub.'
     Assert-ToolGui ($settingsForm.Tag.UpdateLabel.Text -ceq 'Not checked yet.') 'Opening Settings must not imply that an update check has already happened.'
+    Assert-ToolGui (($settingsForm.Tag.Editor.Controls.Name -join ',') -ceq 'Updates,Websites,Appearance,Diagnostics') 'Preferences must be grouped into four coherent settings sections.'
+    Assert-ToolGui (-not $settingsForm.Tag.StatusLabel.Visible -and -not $settingsForm.Tag.CancelUpdateButton.Visible) 'Idle settings must not display a redundant Ready message or unavailable update-cancel command.'
+    Assert-ToolGui ($settingsForm.Tag.ApplyButton.Parent.FlowDirection -eq [Windows.Forms.FlowDirection]::RightToLeft -and $settingsForm.Tag.ApplyButton.Right -le $settingsForm.Tag.CloseButton.Left) 'Settings must use a right-aligned Save and Cancel footer in the conventional order.'
+    Assert-ToolGui ($settingsForm.Tag.DesktopCheck.Parent -eq $settingsForm.Tag.StartMenuCheck.Parent) 'New-website shortcut choices must share one setting row.'
+    Assert-ToolGui ($settingsForm.Tag.CheckUpdatesButton.Parent.Height -le $settingsForm.Tag.CheckUpdatesButton.Height + $settingsForm.Tag.CheckUpdatesButton.Margin.Vertical + 2) 'The idle update row must shrink to its visible command height.'
+    foreach ($section in $settingsForm.Tag.Editor.Controls) {
+        $contentHeight = ($section.Controls | ForEach-Object { $_.Height + $_.Margin.Vertical } | Measure-Object -Sum).Sum
+        Assert-ToolGui ($section.Height -le $contentHeight + 2) ('Settings sections must not reserve empty rows for wrapped commands: ' + $section.Name)
+    }
+    Assert-ToolGui (-not $settingsForm.Tag.EditorViewport.VerticalScroll.Visible) 'All four Settings sections must fit without scrolling at the default text size.'
     Assert-ToolGui ($settingsForm.Tag.ProfileInput.Items.Count -eq 4) 'The default-profile picker must include local profiles without bookmarks and the Edge-controlled option.'
     $settingsForm.Tag.AutoUpdateCheck.Checked = $true
     $settingsForm.Tag.DebugCheck.Checked = $true
@@ -328,11 +339,11 @@ try {
         $script:NextUpdateRequest = New-ToolUpdateRequest -Version $versionText -Fail:($outcome -eq 'Failure')
         $request = $script:NextUpdateRequest
         $settingsUi.CheckUpdatesButton.PerformClick()
-        Assert-ToolGui ($settingsUi.UpdateSpinner.IsBusy -and -not $settingsUi.CheckUpdatesButton.Enabled -and $settingsUi.CancelUpdateButton.Enabled) 'Checking updates must show activity and expose cancellation.'
+        Assert-ToolGui ($settingsUi.UpdateSpinner.IsBusy -and -not $settingsUi.CheckUpdatesButton.Enabled -and $settingsUi.CancelUpdateButton.Enabled -and $settingsUi.CancelUpdateButton.Visible) 'Checking updates must show activity and expose cancellation.'
         if ($outcome -eq 'Cancel') { $settingsUi.CancelUpdateButton.PerformClick(); Assert-ToolGui $request.Cancellation.IsCancellationRequested 'Cancel must signal the pending update worker.' }
         $request.AsyncResult.IsCompleted = $true
         Complete-EeaFormUpdateCheck $settingsOwner
-        Assert-ToolGui ($request.PowerShell.Disposed -and -not $settingsUi.UpdateSpinner.IsBusy -and $settingsUi.CheckUpdatesButton.Enabled -and -not $settingsOwner.Tag.UpdateTimer.Enabled) 'Every update outcome must dispose the worker and restore controls.'
+        Assert-ToolGui ($request.PowerShell.Disposed -and -not $settingsUi.UpdateSpinner.IsBusy -and $settingsUi.CheckUpdatesButton.Enabled -and -not $settingsOwner.Tag.UpdateTimer.Enabled -and -not $settingsUi.CancelUpdateButton.Visible) 'Every update outcome must dispose the worker and restore controls.'
         if ($outcome -eq 'Available') {
             Assert-ToolGui ($settingsUi.DownloadUpdateButton.Visible -and $settingsOwner.Tag.DownloadUpdateItem.Available -and $settingsUi.UpdateLabel.Text.Contains('1.4.0')) 'New releases must expose the official download action and version.'
             Test-ToolFormLayout $settingsForm 'settings-update'

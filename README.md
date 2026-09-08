@@ -50,18 +50,18 @@ Windows owns the pin and may keep a separate shortcut copy. After changing a web
 
 ## Settings and updates
 
-Open the gear menu, then **Preferences...**. Changes take effect after **Save settings**; **Cancel** discards unsaved choices. The main window's **Motion** checkbox saves its choice immediately.
+Open the gear menu, then **Preferences...**. Settings are grouped into **Updates**, **Websites**, **Appearance**, and **Diagnostics**, with related controls on shared rows. All four sections fit at the default text size; enlarged text remains scrollable, with **Save settings** and **Cancel** at the bottom right. Changes take effect after **Save settings**; **Cancel** discards unsaved choices. The main window's **Motion** checkbox saves its choice immediately.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
 | Automatic update checks | Off | Checks GitHub at most once per 24 hours when setup opens or preferences are saved |
-| Debug logging | Off | Writes limited, local diagnostic events; nothing is uploaded |
 | Edge profile for new websites | Let Edge choose | Optionally saves a local `Default` or `Profile <number>` identifier with newly created apps |
 | Desktop and Start menu shortcuts | Both on | Initial placement in the new-website editor; at least one is required |
 | Animate the space background | On | Respects Windows reduced-motion, high-contrast, and remote-session settings |
 | Text size | 12 points | Choose 12, 14, 16, or 18 points for setup, its menu, and owned helper dialogs |
+| Debug logging | Off | Writes limited, local diagnostic events; nothing is uploaded |
 
-![Settings with opt-in update checking, profile selection, shortcut defaults, and appearance controls.](docs/images/settings.png)
+![Settings with grouped Updates, Websites, Appearance, and Diagnostics sections and a right-aligned Save and Cancel footer.](docs/images/settings.png)
 
 **Check for updates** is available from the gear menu and Settings, even with automatic checks off. A detected newer stable release exposes **Download update**, which opens the official GitHub release page. No application code is downloaded or installed by the checker. Close setup, download the new MSI, and run it to upgrade; portable users replace their reviewed script. Checks can be cancelled, and connection or rate-limit failures leave the installed version unchanged.
 
