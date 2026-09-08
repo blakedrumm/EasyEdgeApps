@@ -35,23 +35,25 @@ function Assert-Gui {
 }
 
 function New-GuiIconRequest {
-    param([byte[]]$IconData, [switch]$Fail)
-    $pipeline = [pscustomobject]@{ Bytes = $IconData; Fail = [bool]$Fail; Disposed = $false }
+    param([byte[]]$IconData, [switch]$Fail, [string]$ResolvedWebsite)
+    $pipeline = [pscustomobject]@{ Bytes = $IconData; Fail = [bool]$Fail; Disposed = $false; Website = $ResolvedWebsite }
     $pipeline | Add-Member ScriptMethod EndInvoke {
         param($Pending)
         if ($this.Fail) { throw 'Synthetic website icon failure.' }
-        return [pscustomobject]@{ Bytes = $this.Bytes; SourceUrl = 'https://example.com/favicon.ico' }
+        return [pscustomobject]@{ Bytes = $this.Bytes; SourceUrl = 'https://example.com/favicon.ico'; Website = $this.Website }
     }
     $pipeline | Add-Member ScriptMethod Stop { }
     $pipeline | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
-    return [pscustomobject]@{ Website = ''; PowerShell = $pipeline; AsyncResult = [pscustomobject]@{ IsCompleted = $false }; Cancellation = (New-Object Threading.CancellationTokenSource); Discard = $false }
+    return [pscustomobject]@{ Website = ''; PowerShell = $pipeline; AsyncResult = [pscustomobject]@{ IsCompleted = $false }; Cancellation = (New-Object Threading.CancellationTokenSource); Discard = $false; ResolveOnly = $false }
 }
 
 function Start-EeaWebsiteIconRequest {
-    param([string]$Website)
-    $address = ConvertTo-EeaWebsite $Website
+    param([string]$Website, [switch]$ResolveOnly)
+    $address = ConvertTo-EeaWebsite $Website -AllowMissingScheme
     Assert-Gui ($null -ne $script:NextIconRequest) 'GUI tests must never use a live website icon service.'
     $script:NextIconRequest.Website = $address
+    $script:NextIconRequest.ResolveOnly = [bool]$ResolveOnly
+    if (-not $script:NextIconRequest.PowerShell.Website) { $script:NextIconRequest.PowerShell.Website = $address }
     return $script:NextIconRequest
 }
 
@@ -62,18 +64,35 @@ function Test-GuiWebsiteIcon {
     $originalUrl = $ui.UrlInput.Text
     $originalHash = (Get-FileHash -LiteralPath $paths.Icon).Hash
     $iconData = ConvertTo-EeaWebsiteIcon (Read-EeaCustomIcon $paths.Icon)
-    $ui.UrlInput.Text = 'http://example.com/'
+    $ui.UrlInput.Text = 'file:///C:/private'
     $ui.GetIconButton.PerformClick()
     Assert-Gui ($null -eq $ui.IconRequest -and $ui.StatusLabel.Text.StartsWith('FAILED:')) 'Invalid website addresses must fail before starting network lookup.'
     $ui.UrlInput.Text = $originalUrl
     $script:NextIconRequest = New-GuiIconRequest $iconData
     $request = $script:NextIconRequest
+    $idleButtonBounds = $ui.GetIconButton.Bounds
     $ui.GetIconButton.PerformClick()
     Assert-Gui ($null -ne $ui.IconRequest -and -not $ui.GetIconButton.Enabled -and $ui.CancelIconButton.Enabled -and -not $ui.SaveButton.Enabled -and $ui.UrlInput.Enabled) 'Lookup must expose cancellation and keep the editor responsive while waiting.'
+    Assert-Gui ($null -ne $ui.PSObject.Properties['ActivitySpinner']) 'Website lookup must expose a loading spinner.'
+    Assert-Gui ($ui.ActivitySpinner.IsBusy -and $ui.ActivitySpinner.Visible -and $ui.GetIconButton.Bounds -eq $idleButtonBounds) 'The spinner must show immediately without shifting the lookup buttons.'
+    $spinnerBitmap = New-Object Drawing.Bitmap($ui.ActivitySpinner.Width, $ui.ActivitySpinner.Height)
+    try {
+        $spinnerBounds = New-Object Drawing.Rectangle([Drawing.Point]::Empty, $spinnerBitmap.Size)
+        $ui.ActivitySpinner.DrawToBitmap($spinnerBitmap, $spinnerBounds)
+        $firstSpinner = [Convert]::ToBase64String((Get-GuiBitmapBytes $spinnerBitmap))
+        $firstFrame = $ui.ActivitySpinner.AnimationFrame
+        $spinnerClock = [Diagnostics.Stopwatch]::StartNew()
+        while ($ui.ActivitySpinner.AnimationFrame -eq $firstFrame -and $spinnerClock.ElapsedMilliseconds -lt 2000) { [Windows.Forms.Application]::DoEvents() }
+        $spinnerClock.Stop()
+        $ui.ActivitySpinner.DrawToBitmap($spinnerBitmap, $spinnerBounds)
+        Assert-Gui ($ui.ActivitySpinner.AnimationFrame -gt $firstFrame -and [Convert]::ToBase64String((Get-GuiBitmapBytes $spinnerBitmap)) -cne $firstSpinner) 'The request timer must visibly animate the spinner while work is pending.'
+    }
+    finally { $spinnerBitmap.Dispose() }
     Assert-Gui ((Get-FileHash -LiteralPath $paths.Icon).Hash -ceq $originalHash) 'Starting lookup must not change the saved icon.'
     $request.AsyncResult.IsCompleted = $true
     Complete-EeaWebsiteIconLookup $Form
     Assert-Gui ($null -eq $ui.IconRequest -and $request.PowerShell.Disposed -and $ui.SaveButton.Enabled -and $ui.GetIconButton.Enabled -and -not $ui.CancelIconButton.Enabled) 'Completed lookups must restore controls and dispose the worker.'
+    Assert-Gui (-not $ui.ActivitySpinner.IsBusy -and -not $ui.IconTimer.Enabled -and $ui.GetIconButton.Bounds -eq $idleButtonBounds) 'Successful lookup must stop the spinner without shifting the buttons.'
     Assert-Gui ($null -ne $ui.WebsiteIconData -and $ui.IconLabel.Text -ceq 'Website icon' -and $ui.IconPreview.Image.Width -eq 96) 'A retrieved website icon must be previewed in memory.'
     Assert-Gui ((Get-FileHash -LiteralPath $paths.Icon).Hash -ceq $originalHash) 'Retrieving an icon must not save it before explicit approval.'
     $ui.SaveButton.PerformClick()
@@ -90,6 +109,7 @@ function Test-GuiWebsiteIcon {
         $request.AsyncResult.IsCompleted = $true
         Complete-EeaWebsiteIconLookup $Form
         Assert-Gui ($null -eq $ui.WebsiteIconData -and $request.PowerShell.Disposed) 'Failures and stale results must never replace the current icon.'
+        Assert-Gui (-not $ui.ActivitySpinner.IsBusy -and -not $ui.IconTimer.Enabled) 'Failure, cancellation, and stale-result cleanup must stop the spinner.'
         Assert-Gui ((Read-EeaManifest $Context 'My News').IconHash -ceq $saved.IconHash) 'A failed or cancelled lookup must leave the saved icon unchanged.'
         if ($outcome -eq 'New') { Assert-Gui ($null -eq $ui.IconPreview.Image) 'A stale lookup must not put the previous site icon into a new editor.'; $ui.AppList.SelectedIndex = 0 }
         $ui.UrlInput.Text = $originalUrl
@@ -97,6 +117,51 @@ function Test-GuiWebsiteIcon {
     Set-EeaEditorIcon -Form $Form -IconData $iconData
     $ui.ClearIconButton.PerformClick()
     Assert-Gui ($null -eq $ui.WebsiteIconData -and $ui.IconLabel.Text -ceq 'Saved icon' -and $null -ne $ui.IconPreview.Image) 'Use saved icon must discard the retrieved image and restore the saved preview.'
+    $bareWebsite = $originalUrl.Substring('https://'.Length)
+    $httpWebsite = 'http://' + $bareWebsite
+    foreach ($resolvedWebsite in @($originalUrl, $httpWebsite)) {
+        $ui.UrlInput.Text = $bareWebsite
+        $script:NextIconRequest = New-GuiIconRequest $iconData -ResolvedWebsite $resolvedWebsite
+        $request = $script:NextIconRequest
+        $ui.GetIconButton.PerformClick()
+        Assert-Gui ($ui.ActivitySpinner.IsBusy -and $null -ne $ui.IconRequest) 'Schemeless icon lookup must run asynchronously with visible activity.'
+        $request.AsyncResult.IsCompleted = $true
+        Complete-EeaWebsiteIconLookup $Form
+        Assert-Gui ($ui.UrlInput.Text -ceq $resolvedWebsite -and $null -ne $ui.WebsiteIconData -and -not $ui.ActivitySpinner.IsBusy) 'Resolved HTTPS or HTTP must appear in the address field before the downloaded icon can be saved.'
+        if ($resolvedWebsite.StartsWith('http://')) { Assert-Gui ($ui.StatusLabel.Text -match 'HTTP.*unencrypted') 'HTTP fallback must be clearly identified as unencrypted.' }
+    }
+    $ui.ClearIconButton.PerformClick()
+    $ui.UrlInput.Text = $bareWebsite
+    $script:NextIconRequest = New-GuiIconRequest $iconData -ResolvedWebsite $originalUrl
+    $request = $script:NextIconRequest
+    $ui.SaveButton.PerformClick()
+    Assert-Gui ($request.ResolveOnly -and $ui.ActivitySpinner.IsBusy -and -not $ui.SaveButton.Enabled) 'Saving a schemeless address must resolve it asynchronously without retrieving an icon.'
+    $request.AsyncResult.IsCompleted = $true
+    Complete-EeaWebsiteIconLookup $Form
+    Assert-Gui ((Read-EeaManifest $Context 'My News').Url -ceq $originalUrl -and $ui.StatusLabel.Text.StartsWith('Saved:') -and -not $ui.ActivitySpinner.IsBusy) 'Successful resolution must resume the explicitly requested save.'
+    $ui.UrlInput.Text = $bareWebsite
+    $script:NextIconRequest = New-GuiIconRequest $iconData -ResolvedWebsite $originalUrl
+    $request = $script:NextIconRequest
+    $savedNotes = $ui.NotesInput.Text
+    $ui.SaveButton.PerformClick()
+    $ui.NotesInput.Text = 'Still editing after save was requested.'
+    $request.AsyncResult.IsCompleted = $true
+    Complete-EeaWebsiteIconLookup $Form
+    Assert-Gui ((Read-EeaManifest $Context 'My News').Notes -ceq $savedNotes -and -not $ui.StatusLabel.Text.StartsWith('Saved:')) 'Edits made during resolution must not be saved by an older pending action.'
+    $ui.NotesInput.Text = $savedNotes
+    $previousApproval = $script:ApproveChange
+    try {
+        $script:ApproveChange = $false
+        $ui.UrlInput.Text = $httpWebsite
+        $ui.SaveButton.PerformClick()
+        Assert-Gui ((Read-EeaManifest $Context 'My News').Url -ceq $originalUrl) 'Declining the unencrypted HTTP warning must leave saved shortcuts unchanged.'
+        $script:ApproveChange = $true
+        $ui.SaveButton.PerformClick()
+        Assert-Gui ((Read-EeaManifest $Context 'My News').Url -ceq $httpWebsite) 'Explicit approval must allow an HTTP address to be saved and read back.'
+        $ui.UrlInput.Text = $originalUrl
+        $ui.SaveButton.PerformClick()
+    }
+    finally { $script:ApproveChange = $previousApproval }
     $script:NextIconRequest = $null
     Write-Host 'PASS: Website icon retrieval, preview, explicit save, cancellation, failure preservation, stale-result rejection, and saved-icon restoration without live network access.'
 }
@@ -128,7 +193,7 @@ function Test-GuiNativeTypeReload {
     try {
         $uiNamespace = Initialize-EeaSpaceBackground
         Assert-Gui ($checkBox -is [Windows.Forms.CheckBox] -and $checkBox.GetType().Namespace -ceq $uiNamespace) 'An older renderer already in memory must not prevent the current checkbox from loading.'
-        foreach ($typeName in @('StarfieldRenderer', 'StarfieldForm', 'SpaceTableLayoutPanel', 'SpaceFlowLayoutPanel', 'SpacePanel', 'IconCheckBox')) {
+        foreach ($typeName in @('StarfieldRenderer', 'StarfieldForm', 'SpaceTableLayoutPanel', 'SpaceFlowLayoutPanel', 'SpacePanel', 'LoadingSpinner', 'IconCheckBox')) {
             Assert-Gui ($null -ne (($uiNamespace + '.' + $typeName) -as [type])) ('The current UI assembly must include ' + $typeName)
         }
         Assert-Gui ((Initialize-EeaSpaceBackground) -ceq $uiNamespace) 'Identical UI source must reuse its loaded assembly.'

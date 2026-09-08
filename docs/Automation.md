@@ -4,7 +4,7 @@ These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.2.0 or l
 
 Run as the Windows user whose shortcuts you intend to manage, not as SYSTEM, an administrator, or a different helper account. The application is still one script; no module, service, or scheduled task is installed.
 
-For built-in help, run `.\EasyEdgeApps.ps1 --help`, `.\EasyEdgeApps.ps1 -h`, or `.\EasyEdgeApps.ps1 -?`. `-Help` is also supported. Help does not open setup or perform an operation. Use `-h`, `-Help`, or `-?` when combining help with an explicit `-Action`.
+For built-in help, run `.\EasyEdgeApps.ps1 --help`, `.\EasyEdgeApps.ps1 -h`, or `.\EasyEdgeApps.ps1 -?`. `-Help` is also supported. Each example explains its scenario and effects; `--help`, `-h`, and `-Help` use compact spacing, while `-?` retains PowerShell's native formatting. Help does not open setup or perform an operation. Use `-h`, `-Help`, or `-?` when combining help with an explicit `-Action`.
 
 ## Unattended approval
 
@@ -13,6 +13,8 @@ For built-in help, run `.\EasyEdgeApps.ps1 --help`, `.\EasyEdgeApps.ps1 -h`, or 
 It does not bypass validation, ownership checks, locking, recovery checks, or stale-preview protection. Exporting over an existing file still requires `-Replace`. `-Preview` and `-WhatIf` remain read-only. `-Quiet` alone is not approval; `-Confirm:$false` remains available for existing scripts. `-Unattended -Confirm` is rejected as contradictory; explicitly specifying `-Confirm:$false` is harmless.
 
 Only an explicit `-Action Open` or install `-Launch` requests a browser launch. Those options can still expose Edge's normal first-run, profile, and sign-in dialogs. Avoid them in background jobs.
+
+Website URLs supplied to commands or kits must include `https://` or `http://`. Commands preserve that scheme and do not probe, download icons, or automatically upgrade addresses. HTTPS-first resolution and icon retrieval are setup-window features. Prefer HTTPS: explicitly supplying HTTP approves an unencrypted destination, including under `-Unattended`. Never include passwords or other secrets in URLs. Favorites import remains HTTPS-only, and kits containing HTTP URLs require application version 1.2.0 or later.
 
 ## Commands
 

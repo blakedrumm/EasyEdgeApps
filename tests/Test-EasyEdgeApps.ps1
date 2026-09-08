@@ -41,8 +41,12 @@ try {
     Test-Case 'Canonical HTTPS keeps query and fragment' {
         Assert-Equal (ConvertTo-EeaWebsite 'HTTPS://EXAMPLE.COM:443/account?view=large&sort=new#/inbox') 'https://example.com/account?view=large&sort=new#/inbox'
     }
+    Test-Case 'Explicit HTTP keeps its scheme and safe launch arguments' {
+        Assert-Equal (ConvertTo-EeaWebsite 'HTTP://EXAMPLE.COM:80/account?view=large#/inbox') 'http://example.com/account?view=large#/inbox'
+        Assert-Equal (Get-EeaArguments 'http://example.com/?query=%22%20%26#/home') '--app="http://example.com/?query=%22%20%26#/home" --start-maximized'
+    }
     Test-Case 'Unsafe URL schemes and credentials are rejected' {
-        foreach ($invalidUrl in @('http://example.com', 'file:///C:/Windows', 'javascript:alert(1)', 'https://user:password@example.com', '//example.com', 'https://')) {
+        foreach ($invalidUrl in @('ftp://example.com', 'file:///C:/Windows', 'javascript:alert(1)', 'https://user:password@example.com', 'http://user:password@example.com', '//example.com', 'https://')) {
             Assert-Rejected { ConvertTo-EeaWebsite $invalidUrl }
         }
     }

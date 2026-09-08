@@ -51,6 +51,18 @@ try {
         $saved = Read-EeaManifest $destination 'My News'
         Assert-Kit ($saved.Notes -ceq "Helper notes`r`nPlain text <only>." -and -not $saved.Desktop -and $saved.StartMenu) 'Preserve notes and placements.'
     }
+    Test-KitCase 'Explicit HTTP addresses survive kit import and export' {
+        $httpContext = New-KitTestContext 'Http'
+        $httpKit = Copy-TestKit $script:Kit
+        $httpKit.Apps[0].Url = 'http://example.com:8080/local?view=large#/home'
+        $result = Import-EeaKit -Kit $httpKit -Context $httpContext -Confirm:$false
+        Assert-Kit $result.Completed 'A reviewed HTTP kit should import without probing or rewriting its URL.'
+        $exported = New-EeaKit -Context $httpContext
+        Assert-Kit ($exported.Apps[0].Url -ceq $httpKit.Apps[0].Url) 'HTTP addresses must stay explicit and portable.'
+        $paths = Get-EeaPaths $httpContext 'My News'
+        $shortcut = Read-EeaShortcut $paths.StartMenu
+        Assert-Kit ($shortcut.Arguments -ceq (Get-EeaArguments $httpKit.Apps[0].Url)) 'The imported shortcut must launch the approved HTTP address directly.'
+    }
     Test-KitCase 'Repeated import is unchanged and byte-identical' {
         $paths = Get-EeaPaths $destination 'My News'
         $hash = (Get-FileHash -LiteralPath $paths.Manifest).Hash
@@ -138,7 +150,7 @@ try {
             { param($candidate) $candidate.SchemaVersion = '1' },
             { param($candidate) $candidate.SchemaVersion = 2 },
             { param($candidate) $candidate.Apps[0].Desktop = 'false' },
-            { param($candidate) $candidate.Apps[0].Url = 'http://example.com/' },
+            { param($candidate) $candidate.Apps[0].Url = 'ftp://example.com/' },
             { param($candidate) $candidate.Apps[0].Name = '..\Outside' },
             { param($candidate) $candidate.Apps[0] | Add-Member -NotePropertyName Path -NotePropertyValue 'C:\Outside' },
             { param($candidate) $candidate.Apps[0].Notes = 'a' * 4001 },

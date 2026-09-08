@@ -137,6 +137,18 @@ function Invoke-CliCase {
 
 function Test-CliHelp {
     $quotedApplicationPath = "'" + $applicationPath.Replace("'", "''") + "'"
+    foreach ($example in (Get-Help -Name $applicationPath -Full).examples.example) {
+        $descriptionText = ($example.remarks | ForEach-Object { $_.Text }) -join ' '
+        Assert-Cli (-not [regex]::IsMatch($descriptionText.Trim(), '[\r\n]')) 'Example descriptions must be single paragraphs so the host wraps them naturally.'
+    }
+    $exampleScenarios = @(
+        "Set up a family member's everyday websites."
+        'Review the available commands before making changes.'
+        'Add a familiar mail shortcut for the current Windows user.'
+        "Preview removal before changing a family member's setup."
+        "Back up the current user's saved websites for a replacement computer."
+        'Restore only My Mail from a previously reviewed, trusted App Kit.'
+    )
     foreach ($helpArguments in @('--help', '-h', '-?', '-Help', '--help -Name ''Help test'' -Url ''https://example.com/'' -Unattended -Quiet', '-h -Action ImportKit -Unattended -Quiet', '-? -Action Repair -Unattended')) {
         $commandText = '$WhatIfPreference = $true' + "`n& " + $quotedApplicationPath + ' ' + $helpArguments + "`nif (-not `$?) { exit 1 }"
         $options = @('-NoLogo', '-NoProfile', '-STA', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', $commandText)
@@ -152,8 +164,14 @@ function Test-CliHelp {
         Assert-Cli ($exitCode -eq 0) ("Help invocation '$helpArguments' returned $exitCode. " + $outputText)
         Assert-Cli ($normalizedText.Contains('Creates easy-to-find, per-user Microsoft Edge website shortcuts on Windows 11.')) ("Help invocation '$helpArguments' must display the application help. " + $outputText)
         Assert-Cli (-not $normalizedText.Contains('What if: Performing')) "Help invocation '$helpArguments' must not dispatch an operation."
+        if (-not $helpArguments.StartsWith('-?')) {
+            Assert-Cli (-not [regex]::IsMatch($outputText, '(?:\r?\n[\t ]*){3}')) "Help invocation '$helpArguments' must use at most one blank line between items."
+            foreach ($scenario in $exampleScenarios) {
+                Assert-Cli ($normalizedText.Contains($scenario)) "Help invocation '$helpArguments' must explain each example's scenario: $scenario"
+            }
+        }
     }
-    Write-Host 'PASS: --help, -h, -?, and -Help display help without setup, action validation, prompts, or writes.'
+    Write-Host 'PASS: Help aliases display documented scenarios and compact custom formatting without setup, action validation, prompts, or writes.'
 }
 
 try {

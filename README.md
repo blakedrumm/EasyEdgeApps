@@ -12,14 +12,14 @@ Set up someone's everyday websites once. Restore and maintain that familiar setu
 
 [Download the script](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps.ps1) | [Latest release](https://github.com/blakedrumm/EasyEdgeApps/releases/latest) | [Automated checks](https://github.com/blakedrumm/EasyEdgeApps/actions/workflows/test.yml)
 
-**Version 1.2.0:** Adds website icon retrieval, command-line automation and help, refreshed Windows controls, and an animated space background. Includes App Kits, optional password-protected exports, Favorites import, helper notes, and Check and Repair. Encrypted exports remain experimental and require independent security review before production use. See the [release notes](docs/releases/v1.2.0.md).
+**Version 1.2.0:** Adds website icon retrieval with a loading spinner, large-image resizing and static SVG support, HTTPS-first address resolution, scenario-based command-line help and automation, refreshed Windows controls, and an animated space background. Includes App Kits, optional password-protected exports, Favorites import, helper notes, and Check and Repair. Encrypted exports remain experimental and require independent security review before production use. See the [release notes](docs/releases/v1.2.0.md).
 
 ## Setup for a family member
 
 1. Sign in to **the Windows account that will use the shortcuts**. Do not run setup as administrator or as another user.
 2. Download **EasyEdgeApps.ps1** using the link above. This is the only file needed to use the program. Review the script before running it.
 3. Right-click the downloaded file and choose **Run with PowerShell**. On Windows 11 this may be under **Show more options**. If local execution policy prevents that, a helper can use the one-time command below.
-4. Enter a familiar name, such as **My Mail**, and the site's normal **https://** address. Optionally select **Get icon** to retrieve its website icon. Leave Desktop and Start menu selected unless you deliberately want only one location.
+4. Enter a familiar name, such as **My Mail**, and the website address. You can omit `https://`; **Add website** and **Get icon** resolve a missing scheme HTTPS-first. Optionally select **Get icon** to retrieve its website icon. Leave Desktop and Start menu selected unless you deliberately want only one location.
 5. Select **Add website**, then **Open**. Complete any Edge first-run prompts and website sign-in together. Check the site's text size, links, and any printing or video calling the person needs.
 6. Close setup. The person can now open the website using its shortcut. Keep the script somewhere the helper can find it for future changes.
 
@@ -50,15 +50,23 @@ The screenshot shows version 1.2.0 with animation paused and synthetic example d
 
 The intended setup operator is a helper. The person using the shortcuts does not need to manage PowerShell.
 
+## Website addresses
+
+The setup address field accepts a full URL or a host such as `example.com/news`. Selecting **Get icon**, **Add website**, or **Save changes** resolves a missing scheme in the background, trying HTTPS first. If the HTTPS connection fails, it tries HTTP and shows the resolved address. Any HTTP response over a valid HTTPS connection, including sign-in or access errors, keeps HTTPS. Certificate or TLS authentication errors never trigger an automatic downgrade. Explicit `https://` and `http://` addresses keep their scheme.
+
+HTTP is unencrypted. Setup labels an HTTP fallback and asks for confirmation before saving an HTTP website. Do not use HTTP for passwords or sensitive information. Resolution does not sign in, execute the page, or prove that the website works. Command-line actions and imported kits require a complete URL and do not probe or upgrade it. Favorites import retains its HTTPS-only selection policy.
+
 ## Website icons
 
-Enter the website's HTTPS address and select **Get icon** beside the icon preview. Setup looks for the page's declared ICO or PNG icon, then tries `/favicon.ico`. The retrieved image appears in the preview; select **Add website** or **Save changes** to save it with the shortcuts. **Use saved icon** restores the previous icon, or the automatic choice for a new website.
+Enter the website address and select **Get icon** beside the icon preview. Setup looks for the page's declared raster or static SVG icon, then tries `/favicon.ico`. ICO, PNG, JPEG, GIF, and BMP images use Windows imaging; supported SVG paths, shapes, and gradients are rendered locally. The retrieved image appears in the preview; select **Add website** or **Save changes** to save it with the shortcuts. **Use saved icon** restores the previous icon, or the automatic choice for a new website.
 
-Lookup runs in the background. The adjacent cancel button stops it; changing the address, selecting another website, or closing setup cancels a pending lookup. Failed lookups leave the current icon unchanged. No network request is made just by typing an address, opening setup, or importing a kit.
+An animated loading ring stays visible while the address or icon is resolving, downloading, or converting. Lookup runs in the background. The adjacent cancel button stops it; changing the address, selecting another website, or closing setup cancels a pending lookup. The spinner stops after completion or cancellation cleanup. Failed lookups leave the current icon unchanged. No network request is made just by typing an address, opening setup, or importing a kit.
 
-Retrieval contacts the entered website and its HTTPS icon or redirect destinations directly. It does not use browser cookies, saved passwords, Windows credentials, or a third-party favicon service. Only retrieve icons from trusted websites and never enter URLs containing secrets. Sites that need sign-in, block automated requests, or offer only SVG icons may require **Choose icon...** instead.
+Retrieval contacts the entered website and its icon or redirect destinations directly. HTTPS requests never downgrade to HTTP; an explicitly selected or resolved HTTP site can use HTTP images. It does not use browser cookies, saved passwords, Windows credentials, or a third-party favicon service. Only retrieve icons from trusted websites and never enter URLs containing secrets. Sites that need sign-in, block automated requests, or use unsupported SVG features may require **Choose icon...** instead. SVG scripts, CSS, external references, embedded images, and overly complex graphics are rejected.
 
-Page responses are limited to 512 KiB, icon downloads to 1 MiB, and PNG dimensions to 1024 pixels per side. Requests have an 8-second cancellation deadline, with a 20-second overall lookup deadline and up to three HTTPS redirects per resource. ICO and PNG images are converted to a Windows-compatible 128-pixel `.ico` in memory; nothing is written until you save. Saved website icons travel with App Kits like other custom icons.
+Discovery reads at most the first 512 KiB of HTML, so larger pages can still provide an icon. Image downloads have no fixed file-size cutoff: they stream to a randomly named, automatically deleted temporary file instead of accumulating the original image in memory. Windows downsampling and fixed-size SVG rendering produce an aspect-preserving, transparent 128-pixel `.ico`, normally about 66 KiB. Large source dimensions are resized rather than rejected for exceeding 1024 pixels. Available disk space, decoder capabilities, malformed data, and rendering-resource limits still apply.
+
+Scheme probes have a 5-second deadline per attempt; page requests have an 8-second deadline and image transfers a 60-second deadline, within a 90-second lookup cancellation budget. Each fetched resource allows up to three redirects. Download files are deleted when their stream closes, including failed conversion or cancellation; saved app files are changed only on explicit save. Saved website icons travel with App Kits like other custom icons. The existing size limits for saved ICOs and imported kits remain in place.
 
 ## Change or remove a website
 
@@ -80,7 +88,7 @@ Only locally present Stable Edge `Default` and `Profile <number>` profiles are o
 
 ## Portable App Kits
 
-An App Kit is one named `.eeakit.json` file containing selected website names, HTTPS addresses, Desktop/Start menu choices, optional plain-text helper notes, and portable icons. Generated icons are recreated locally; custom icons are embedded as validated bytes. No installed paths, browser data, credentials, browser flags, commands, or original icon-file dependencies are included.
+An App Kit is one named `.eeakit.json` file containing selected website names, explicit HTTPS or HTTP addresses, Desktop/Start menu choices, optional plain-text helper notes, and portable icons. Generated icons are recreated locally; custom icons are embedded as validated bytes. No installed paths, browser data, credentials, browser flags, commands, or original icon-file dependencies are included.
 
 ### Family or replacement-PC workflow
 
@@ -145,7 +153,7 @@ Use `-Unattended` for explicitly approved, no-prompt operations and `-AppNames` 
 
 `-NoStartMenu` omits the Start menu shortcut. At least one location must be selected. `-Quiet` suppresses routine command-line messages and formatted previews, not result objects, errors, safety warnings, or `-WhatIf` output. It does not approve changes. Command-line operations do not show setup dialogs. Failures return exit code 1. Use `-Quiet` with an explicit command-line action, not the default setup action.
 
-`-Name` and `-Url` together imply `-Action Install` when no action is supplied. Website addresses must be absolute HTTPS URLs. Arbitrary Edge switches, embedded credentials, HTTP, and executable URL schemes are intentionally unsupported. Query strings and fragments are preserved for sites that depend on them.
+`-Name` and `-Url` together imply `-Action Install` when no action is supplied. Command-line website addresses must be absolute HTTPS or HTTP URLs; no scheme probing is performed. Prefer HTTPS: supplying HTTP explicitly accepts an unencrypted destination. Arbitrary Edge switches, embedded credentials, and executable URL schemes remain unsupported. Query strings and fragments are preserved for sites that depend on them.
 
 ### Favorites and maintenance commands
 
@@ -239,7 +247,7 @@ App IDs use SHA-256 of normalized names. Saved file paths are never used to choo
 
 Updates stage all output first, copy recovery data, use same-directory atomic replacement for each file, and write settings last. Caught failures trigger rollback. A per-user, per-Windows-session mutex prevents simultaneous changes in the same session. Operations spanning several files are not a single filesystem transaction and cannot guarantee crash or power-loss atomicity.
 
-There is no installer telemetry, automatic script updating, scheduled task, service, or registry write. The optional **Get icon** command reads a bounded website page and icon images over HTTPS; it does not execute page scripts. Opening a website makes the normal network requests performed by Edge and that website.
+There is no installer telemetry, automatic script updating, scheduled task, service, or registry write. The optional **Get icon** command reads a bounded page prefix and streams icon images; it does not execute page scripts. Scheme resolution occurs only for a schemeless address submitted through setup. Opening a website makes the normal network requests performed by Edge and that website.
 
 ## Recovery
 
@@ -255,6 +263,8 @@ A `complete.txt` file containing `EasyEdgeApps:complete:1` means the operation c
 ## Verification and development
 
 To regenerate the embedded application icon from [the source artwork](docs/images/app-icon.png), run `pwsh.exe -NoProfile -File .\tools\Update-BrandIcon.ps1`. The generator updates only the icon data in the script. End users do not need the source image or the generator.
+
+SVG rendering uses pinned, unmodified SVG.NET 3.4.8 and ExCSS 4.2.3 assemblies, plus .NET Framework compatibility assemblies, embedded in the script. No runtime installation or download is needed. Their licenses and notices are retained in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and in the script's compressed payload. After dot-sourcing the script, `(Get-EeaSvgRuntimePayload).Notices` returns those notices. [tools/Update-SvgRuntime.ps1](tools/Update-SvgRuntime.ps1) regenerates the payload from a `-PackageDirectory` containing the exact package names and hashes listed in that generator, plus upstream `svg.LICENSE.txt` and `excss.LICENSE.txt` notices.
 
 The test scripts need no test framework or external packages. They write to uniquely named temporary folders, not your actual Desktop or Start menu. Core tests use real Windows shortcut COM objects; the GUI smoke test exercises native controls offscreen.
 
@@ -272,7 +282,7 @@ Run all isolated suites and parser checks for the current host, or both installe
 .\tests\Invoke-Tests.ps1 -BothHosts -ScreenshotDirectory "$env:TEMP\EasyEdgeApps-captures"
 ```
 
-The ten suites cover the existing core, JSON portability, Favorites discovery/import, website icon retrieval, App Kits and repair, RFC cryptographic known-answer tests, encrypted files and bidirectional host interoperability, public CLI binding/dispatch, and both native GUI surfaces. Website icon tests use offline HTTP fixtures for discovery, redirects, byte limits, image conversion, real background workers, and cancellation. GUI checks cover preview, explicit saving, stale results, and enlarged-font icon controls. The CLI harness runs the unchanged public parameter block and dispatcher through a temporary script file to verify real script exit codes. It redirects known-folder dependencies into temporary storage and captures explicit launch requests instead of opening Edge. It never redirects your actual Windows folders. Interoperability tests require both `powershell.exe` and `pwsh.exe`.
+The ten suites cover the existing core, JSON portability, Favorites discovery/import, website icon retrieval, App Kits and repair, RFC cryptographic known-answer tests, encrypted files and bidirectional host interoperability, public CLI binding/dispatch, and both native GUI surfaces. Website icon tests use offline HTTP fixtures for HTTPS-first resolution, secure redirects, bounded HTML prefixes, large raster and static SVG conversion, temporary-file cleanup, real background workers, and cancellation. GUI checks cover animated spinner pixels, preview, explicit saving, HTTP consent, stale results and save intent, and enlarged-font icon controls. The CLI harness runs the unchanged public parameter block and dispatcher through a temporary script file to verify real script exit codes. It redirects known-folder dependencies into temporary storage and captures explicit launch requests instead of opening Edge. It never redirects your actual Windows folders. Interoperability tests require both `powershell.exe` and `pwsh.exe`.
 
 Local verification uses Windows 11 Enterprise build **26200**, Windows PowerShell **5.1.26100.8875**, and PowerShell **7.6.5**, without elevation. The Windows workflow invokes the same runner in each host. Enlarged-font layout tests cap windows to 1024 by 768 and include rendered-icon pixel checks. They do not replace physical high-DPI, high-contrast, Narrator, multi-monitor, or real-site testing with the intended user.
 

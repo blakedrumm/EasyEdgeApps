@@ -1,6 +1,6 @@
 # App Kit Format
 
-This is the version 1 App Kit contract introduced in Easy Edge Apps 1.1.0. Runtime delivery remains one PowerShell script with only Windows/.NET dependencies. The same portable data works in Windows PowerShell 5.1 and PowerShell 7 on Windows. Encrypted exports remain experimental and require independent security review before production use.
+This is the version 1 App Kit contract introduced in Easy Edge Apps 1.1.0. Runtime delivery remains one self-contained PowerShell script; optional website icon retrieval uses embedded SVG dependencies as well as Windows/.NET. The same portable data works in Windows PowerShell 5.1 and PowerShell 7 on Windows. Encrypted exports remain experimental and require independent security review before production use.
 
 ## Standard payload
 
@@ -33,11 +33,13 @@ Required kit fields are `Product`, `SchemaVersion`, `Name`, and `Apps`. Required
 | SchemaVersion | Integer `1`, not a string, Boolean, or decimal value |
 | Name | String, trimmed and normalized to Unicode Form C; 1 to 60 UTF-16 code units; safe Windows shortcut name, no hidden controls, path separators, reserved device names, or trailing dot |
 | Apps | JSON array with 1 to 100 app objects; unique case-insensitive, normalized name identities |
-| Url | String containing an absolute, well-formed HTTPS address; no embedded credentials, whitespace/control/format characters, quotes, or backslashes; original and canonical address at most 2048 characters |
+| Url | String containing an absolute, well-formed HTTPS or HTTP address; no embedded credentials, whitespace/control/format characters, quotes, or backslashes; original and canonical address at most 2048 characters |
 | Desktop, StartMenu | Actual JSON Booleans; at least one true |
 | Notes | Plain string, at most 4000 UTF-16 code units; hidden controls/format characters rejected; CR, LF, and TAB allowed; never executed or rendered as markup |
 
 URL hosts are canonicalized with `Uri`/`UriBuilder` and IDN ASCII host representation. Query strings and fragments are preserved subject to normal URI canonicalization. Exact canonical URL equality determines Favorites duplicates; app identity remains based on the normalized name. Kit notes are shown during import but are not a separate persisted kit catalog. App notes are saved with each installed app.
+
+HTTP URLs are supported starting in application version 1.2.0; older application versions reject kits containing them. HTTP is unencrypted. Import preserves the explicitly supplied scheme without network probing or automatic upgrade. The payload schema remains version 1, and existing HTTPS-only kits are unchanged.
 
 Payload JSON files and compact canonical payloads are limited to 16 MiB. JSON reading uses the bounded .NET JSON reader, preserving strings such as date-looking notes rather than coercing them into runtime dates. App Kit nesting is limited to 16 reader levels and 4096 values, counted in a streaming pass before constructing objects. Edge metadata uses separate limits of 256 reader levels and 250,000 values; Favorites traversal additionally limits the bar to 10,000 entries/folders and 64 levels. Malformed UTF-8, trailing commas, comments, duplicate fields, and unsupported scalar values are rejected before domain validation.
 
