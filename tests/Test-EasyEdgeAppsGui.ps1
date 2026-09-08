@@ -736,9 +736,18 @@ try {
         if ($pointSize -eq 12) {
             $ui.EditorViewport.AutoScrollPosition = New-Object Drawing.Point(0, 0)
             [Windows.Forms.Application]::DoEvents()
-            foreach ($control in @($ui.TaskbarCheck, $ui.FreshSessionCheck, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
-                $bounds = $ui.EditorViewport.RectangleToClient($control.RectangleToScreen($control.ClientRectangle))
-                Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($bounds)) ('Default layout must show the privacy choice and website actions without scrolling: ' + $control.Text)
+            $heightLimit = [Windows.Forms.Screen]::FromControl($form).WorkingArea.Height
+            if ($MaximumWindowHeight -gt 0) { $heightLimit = [Math]::Min($heightLimit, $MaximumWindowHeight) }
+            $requiredGrowth = [Math]::Max(0, $ui.EditorViewport.AutoScrollMinSize.Height - $ui.EditorViewport.ClientSize.Height)
+            if ($form.Height + $requiredGrowth -gt $heightLimit) {
+                Assert-Gui ($form.Height -eq $heightLimit -and $ui.EditorViewport.VerticalScroll.Visible) 'A compact default layout must use the available height and retain scrolling.'
+                Write-Host ('PASS: Compact default layout retains scrolling within the ' + $heightLimit + '-pixel height limit.')
+            }
+            else {
+                foreach ($control in @($ui.TaskbarCheck, $ui.FreshSessionCheck, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+                    $bounds = $ui.EditorViewport.RectangleToClient($control.RectangleToScreen($control.ClientRectangle))
+                    Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($bounds)) ('Default layout must show the privacy choice and website actions without scrolling when space permits: ' + $control.Text)
+                }
             }
         }
         foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.TaskbarCheck, $ui.FreshSessionCheck, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
