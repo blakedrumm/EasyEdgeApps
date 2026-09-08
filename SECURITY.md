@@ -14,10 +14,11 @@ Do not include credentials, tokens, personal website addresses, account screensh
 
 - Only run a reviewed copy obtained from the official repository or its releases. The PowerShell script, MSI, and manager launcher are unsigned. Checksums do not authenticate a publisher.
 - Installation is current-user only and intentionally requires no administrator elevation.
-- HTTPS is preferred; explicit HTTP destinations are supported and unencrypted. Passwords and arbitrary browser flags cannot be supplied as launch options. Version 1.3.0 permits only validated local profile identifiers as an additional launch argument.
+- HTTPS is preferred; explicit HTTP destinations are supported and unencrypted. Passwords and arbitrary browser flags cannot be supplied as launch options. Starting with version 1.3.0, only validated local profile identifiers are permitted as an additional launch argument.
 - No remote code or dependencies are downloaded by setup. Website icon retrieval and scheme resolution contact submitted destinations only after an explicit command. Optional update checks contact the fixed official GitHub release endpoint, manually or after the user enables automatic checks. SVG rendering dependencies and their license notices are embedded.
 - URLs are stored locally, including any query strings or fragments. Never configure a URL containing a secret.
 - Saved metadata is validated; persistent paths do not control writes or deletion. Existing artifacts are checked before replacement or removal.
+- Taskbar pinning assistance opens File Explorer with a validated, owned saved shortcut selected. Windows requires a separate manual pin action. The tool does not use hidden pinning verbs, edit taskbar registry data, store pin state, or manage pins during import, repair, removal, or MSI maintenance.
 - Ownership checks are accident-prevention measures, not a sandbox against another process running as the same user, an administrator, or a compromised browser.
 - Browser security, cookies, and credentials remain in Edge's control. A helper may save a local launch-profile identifier, without reading or copying that profile's sign-in data. An app window is not kiosk isolation.
 - Multi-file changes support caught-error rollback, not guaranteed power-failure atomicity. Preserve recovery files when setup requests help.

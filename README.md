@@ -6,21 +6,21 @@
 
 Turn trusted websites into easy-to-find Microsoft Edge app-window shortcuts on Windows 11. Install Easy Edge Apps as a normal Windows application, or use the same self-contained PowerShell script as a portable tool.
 
-A helper sets it up once in the person's Windows account. Everyday use is opening a familiar Desktop or Start menu shortcut, with no PowerShell window, administrator prompt, or extra launcher running in the background.
+A helper sets it up once in the person's Windows account. Everyday use is opening a familiar Desktop, Start menu, or manually pinned taskbar shortcut, with no PowerShell window, administrator prompt, or extra launcher running in the background.
 
 Set up someone's everyday websites once. Restore and maintain that familiar setup whenever they need help.
 
-[Download MSI (x64)](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps-1.3.0-x64.msi) | [Download portable script](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps.ps1) | [Latest release](https://github.com/blakedrumm/EasyEdgeApps/releases/latest) | [Automated checks](https://github.com/blakedrumm/EasyEdgeApps/actions/workflows/test.yml)
+[Download MSI (x64)](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps-1.3.1-x64.msi) | [Download portable script](https://github.com/blakedrumm/EasyEdgeApps/releases/latest/download/EasyEdgeApps.ps1) | [Latest release](https://github.com/blakedrumm/EasyEdgeApps/releases/latest) | [Automated checks](https://github.com/blakedrumm/EasyEdgeApps/actions/workflows/test.yml)
 
-**Version 1.3.0:** Adds a per-user MSI, Settings and update controls, opt-in automatic update checks and debug logging, a default Edge profile for new websites, saved shortcut-placement defaults, persistent motion preferences, and adjustable text size. The portable script, App Kits, website icons, Favorites import, and Check and Repair remain available. Encrypted exports remain experimental and require independent security review before production use. See the [release notes](docs/releases/v1.3.0.md).
+**Version 1.3.1:** Adds **Pin to taskbar...** beside Desktop and Start menu. It selects the saved website shortcut in File Explorer; you complete the pin using Windows' menu. The per-user MSI, portable script, Settings, update checks, App Kits, website icons, Favorites import, and Check and Repair remain available. Encrypted exports remain experimental and require independent security review before production use. See the [release notes](docs/releases/v1.3.1.md).
 
 ## Setup for a family member
 
 1. Sign in to **the Windows account that will use the shortcuts**. Do not run setup as administrator or as another user.
-2. Download and open **EasyEdgeApps-1.3.0-x64.msi**. Complete its installation wizard, then open **Easy Edge Apps** from Start. The installer is per-user and does not request administrator rights.
+2. Download and open **EasyEdgeApps-1.3.1-x64.msi**. Complete its installation wizard, then open **Easy Edge Apps** from Start. The installer is per-user and does not request administrator rights.
 3. Open the gear menu and **Preferences...** to choose a default Edge profile or adjust text size, placement, and motion. For the portable option, download **EasyEdgeApps.ps1** instead and use **Run with PowerShell**, or the one-time command below. It remains the only runtime file needed for portable use.
 4. Enter a familiar name, such as **My Mail**, and the website address. You can omit `https://`; **Add website** and **Get icon** resolve a missing scheme HTTPS-first. Optionally select **Get icon** to retrieve its website icon. Leave Desktop and Start menu selected unless you deliberately want only one location.
-5. Select **Add website**, then **Open**. Complete any Edge first-run prompts and website sign-in together. Check the site's text size, links, and any printing or video calling the person needs.
+5. Select **Add website**, then **Open**. Complete any Edge first-run prompts and website sign-in together. Check the site's text size, links, and any printing or video calling the person needs. For optional taskbar access, follow [Pin a website to the taskbar](#pin-a-website-to-the-taskbar).
 6. Close setup. The person can now open the website using its shortcut. Return through **Easy Edge Apps** in Start for future changes, or keep the portable script somewhere the helper can find it.
 
 For the portable script downloaded to the usual Downloads folder:
@@ -33,9 +33,20 @@ This execution-policy option applies only to that PowerShell process. It does no
 
 Use ordinary site addresses, not password-reset links, one-time sign-in links, or URLs containing secrets. Addresses, including query strings and fragments, are saved locally in clear text.
 
-![The setup window with a saved website, Get icon controls, Motion, and the Settings gear.](docs/images/setup.png)
+![The setup window with a saved website, Pin to taskbar, Get icon controls, Motion, and the Settings gear.](docs/images/setup.png)
 
-The screenshot shows version 1.3.0 with animation paused and synthetic example data.
+The screenshot shows version 1.3.1 with animation paused and synthetic example data.
+
+## Pin a website to the taskbar
+
+1. Select a saved website. Save any changes you want the taskbar shortcut to use first.
+2. Select **Pin to taskbar...** beside Desktop and Start menu. File Explorer opens with the saved shortcut selected.
+3. Right-click the selected shortcut, choose **Show more options** if needed, then **Pin to taskbar**.
+4. Open the new taskbar shortcut and check that it opens the intended website and Edge profile.
+
+This is a manual Windows pinning flow, not an automatic placement checkbox. The command prefers the owned Start menu shortcut and falls back to the owned Desktop shortcut. It does not save editor changes, open the website, invoke hidden pinning verbs, change taskbar registry data, or report a pin as completed. Missing or changed shortcuts need **Check and Repair** first. Windows policy and shell behavior can restrict pinning; the tool does not bypass those restrictions.
+
+Windows owns the pin and may keep a separate shortcut copy. After changing a website's address, profile, or icon, unpin and pin it again if the taskbar entry is stale. Unpin a website before removing it from the manager. App Kits, Check and Repair, and MSI maintenance do not create, refresh, or remove taskbar pins. Windows may group these app windows with Edge; use Edge's own **Install this site as an app** when you need a registered web app.
 
 ## Settings and updates
 
@@ -319,9 +330,11 @@ Run all isolated suites and parser checks for the current host, or both installe
 .\tests\Invoke-Tests.ps1 -BothHosts -ScreenshotDirectory "$env:TEMP\EasyEdgeApps-captures"
 ```
 
-The twelve suites cover the existing core, JSON portability, Favorites discovery/import, website icon retrieval, strict settings and private logging, fixed-endpoint update checks, App Kits and repair, RFC cryptographic known-answer tests, encrypted files and bidirectional host interoperability, public CLI binding/dispatch, and both native GUI surfaces. Offline fixtures cover redirects, bounded responses, real background workers, cancellation, profile preservation, update states, and daily-check throttling. GUI checks cover actual modal font inheritance, 12/18/24-point layouts, spinner pixels, explicit saving, stale results, and damaged-preference recovery. The CLI harness runs the unchanged public parameter block and dispatcher through a temporary script file to verify real script exit codes and profile launch arguments. It redirects known-folder dependencies into temporary storage and captures browser launches instead of opening Edge. It never redirects your actual Windows folders. Interoperability tests require both `powershell.exe` and `pwsh.exe`.
+The thirteen suites cover the existing core, JSON portability, Favorites discovery/import, website icon retrieval, strict settings and private logging, fixed-endpoint update checks, taskbar pinning assistance, App Kits and repair, RFC cryptographic known-answer tests, encrypted files and bidirectional host interoperability, public CLI binding/dispatch, and both native GUI surfaces. Offline fixtures cover redirects, bounded responses, real background workers, cancellation, profile preservation, update states, and daily-check throttling. GUI checks cover actual modal font inheritance, 12/18/24-point layouts, spinner pixels, explicit saving, stale results, damaged-preference recovery, and the taskbar button's saved-selection and failure states. Taskbar tests capture Explorer launches and verify quoted paths, ownership, placement fallback, and unchanged saved files without changing real pins. The CLI harness runs the unchanged public parameter block and dispatcher through a temporary script file to verify real script exit codes and profile launch arguments. It redirects known-folder dependencies into temporary storage and captures browser launches instead of opening Edge. It never redirects your actual Windows folders. Interoperability tests require both `powershell.exe` and `pwsh.exe`.
 
 Local verification uses Windows 11 Enterprise build **26200**, Windows PowerShell **5.1.26100.8875**, and PowerShell **7.6.5**, without elevation. The Windows workflow invokes the same runner in each host and separately builds and tests the MSI. Installer checks cover actual install, upgrade from a synthetic older-version package, downgrade rejection, repair, per-user registration, complete notices, and uninstall preservation. A compiled-launcher probe verifies an STA Windows PowerShell process with no console or forwarded arguments. Enlarged-font layout tests cap windows to 1024 by 768 and include rendered-icon pixel checks. They do not replace physical high-DPI, high-contrast, Narrator, multi-monitor, or real-site testing with the intended user.
+
+A native Explorer smoke check verified that the taskbar command selects the intended synthetic shortcut. The final Windows menu command, pin creation, and subsequent pinned launch still need manual verification on the intended computer; automated tests deliberately do not alter the user's taskbar.
 
 Before handing over this version, exercise a protected-kit transfer between two real Windows accounts/computers, the intended Edge profile's Favorites selection, recovery/file-lock behavior, and any OneDrive or network-backed destination. Review the custom crypto composition independently before using encrypted exports for sensitive production data. Private `.eeakit.json` files are ignored by Git; never force-add real kits, passwords, or browser fixtures.
 

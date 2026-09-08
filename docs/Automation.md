@@ -1,8 +1,10 @@
 # Command-Line Automation
 
-These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.3.0. Unattended commands and selected kit imports remain compatible with version 1.2.0; per-app launch-profile overrides require 1.3.0. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
+These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.3.1. Unattended commands and selected kit imports remain compatible with version 1.2.0; per-app launch-profile overrides require 1.3.0. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
 
 Run as the Windows user whose shortcuts you intend to manage, not as SYSTEM, an administrator, or a different helper account. The portable application is still one script; the optional MSI installs that same script and a graphical manager launcher. No module, service, or scheduled task is installed. Automate the script directly, not the MSI launcher, which accepts no forwarded options.
+
+Taskbar pinning assistance is a setup-window command that opens the saved shortcut in File Explorer for a manual Windows pin action. There is no unattended pinning action or taskbar placement flag, and App Kits do not contain taskbar pins.
 
 For built-in help, run `.\EasyEdgeApps.ps1 --help`, `.\EasyEdgeApps.ps1 -h`, or `.\EasyEdgeApps.ps1 -?`. `-Help` is also supported. Each example explains its scenario and effects; `--help`, `-h`, and `-Help` use compact spacing, while `-?` retains PowerShell's native formatting. Help does not open setup or perform an operation. Use `-h`, `-Help`, or `-?` when combining help with an explicit `-Action`.
 

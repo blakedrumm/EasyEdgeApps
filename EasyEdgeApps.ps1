@@ -64,7 +64,7 @@ Back up the current user's saved websites for a replacement computer. Exports al
 
 Restore only My Mail from a previously reviewed, trusted App Kit. Adds or updates that named app for the current Windows user and leaves unselected apps alone. -Unattended approves the selected changes without prompts but retains validation and ownership checks. Run with -Preview first to review destinations without installing. Sign in to the website separately after restoring its shortcuts.
 .NOTES
-Version: 1.3.0
+Version: 1.3.1
 .LINK
 https://github.com/blakedrumm/EasyEdgeApps
 #>
@@ -355,7 +355,7 @@ function Get-EeaVersion {
     [CmdletBinding()]
     param()
 
-    return [version]'1.3.0'
+    return [version]'1.3.1'
 }
 
 function New-EeaSettings {
@@ -1856,6 +1856,32 @@ function Remove-EeaApp {
     }
 }
 
+function Show-EeaTaskbarShortcut {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)][string]$AppName, $Context = (Get-EeaContext))
+
+    Assert-EeaReady $Context
+    $state = Read-EeaManifest $Context $AppName
+    if ($null -eq $state) { throw 'Save this website before pinning it to the taskbar.' }
+    $paths = Get-EeaPaths $Context $state.Name
+    $shortcutPath = $null
+    foreach ($slot in @('StartMenu', 'Desktop')) {
+        if (-not $state.$slot) { continue }
+        Assert-EeaSafePath $paths.$slot
+        if ([IO.File]::Exists($paths.$slot) -and (Test-EeaOwnedShortcut $paths.$slot $state $paths)) {
+            $shortcutPath = $paths.$slot
+            break
+        }
+    }
+    if (-not $shortcutPath) { throw 'The saved shortcuts are missing or changed. Use Check and Repair before pinning.' }
+    $explorerPath = Join-Path ([Environment]::GetFolderPath('Windows')) 'explorer.exe'
+    if (-not [IO.File]::Exists($explorerPath)) { throw 'Windows File Explorer could not be found.' }
+    if ($PSCmdlet.ShouldProcess($state.Name, 'Show the saved shortcut in File Explorer for manual taskbar pinning')) {
+        Start-Process -FilePath $explorerPath -ArgumentList ('/select,"{0}"' -f $shortcutPath) -ErrorAction Stop
+        return $shortcutPath
+    }
+}
+
 function Start-EeaApp {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([Parameter(Mandatory = $true)][string]$AppName, $Context = (Get-EeaContext))
@@ -3217,6 +3243,7 @@ function New-EeaSymbolImage {
         Refresh = 0xE72C; Close = 0xE711; Image = 0xEB9F; Name = 0xE8AC; Link = 0xE71B
         Notes = 0xE70B; Privacy = 0xEA18; Lock = 0xE72E; Unlock = 0xE785; Info = 0xE946
         Desktop = 0xE7F4; Start = 0xE8FC; SelectAll = 0xE8B3; Motion = 0xE768; Settings = 0xE713
+        Pin = 0xE718
     }
     if (-not $symbols.ContainsKey($Icon)) { throw 'An interface icon is not recognized.' }
     $font = $null
@@ -3541,6 +3568,7 @@ function Reset-EeaEditor {
     Set-EeaControlIcon -Control $ui.SaveButton -Icon Add
     $ui.OpenButton.Enabled = $false
     $ui.RemoveButton.Enabled = $false
+    $ui.PinButton.Enabled = $false
     [void]$ui.NameInput.Focus()
 }
 
@@ -3906,11 +3934,15 @@ function New-EeaSetupForm {
     $desktopCheck = New-EeaCheckBox '&Desktop' -Icon Desktop
     $desktopCheck.AutoSize = $true
     $desktopCheck.Checked = $true
-    $desktopCheck.Margin = New-Object Windows.Forms.Padding(0, 0, 20, 8)
+    $desktopCheck.Margin = New-Object Windows.Forms.Padding(0, 8, 20, 8)
     $startMenuCheck = New-EeaCheckBox 'Start &menu' -Icon Start
     $startMenuCheck.AutoSize = $true
     $startMenuCheck.Checked = $true
-    $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck))
+    $startMenuCheck.Margin = New-Object Windows.Forms.Padding(0, 8, 12, 8)
+    $pinButton = New-EeaButton '&Pin to taskbar...' -Icon Pin -AccessibleName 'Pin saved website to taskbar'
+    $pinButton.AccessibleDescription = 'Save the website first. In File Explorer, right-click its selected shortcut, choose Show more options if needed, then Pin to taskbar.'
+    $pinButton.Enabled = $false
+    $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck, $pinButton))
     $editor.Controls.Add($placement, 0, 6)
 
     $iconPanel = New-Object ($uiNamespace + '.SpaceFlowLayoutPanel')
@@ -3999,7 +4031,7 @@ function New-EeaSetupForm {
     })
     $form.Tag = [pscustomobject]@{
         Context = $Context; AppList = $appList; NameInput = $nameInput; UrlInput = $urlInput; NotesInput = $notesInput
-        DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck; CustomIcon = $null
+        DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck; PinButton = $pinButton; CustomIcon = $null
         WebsiteIconData = $null; WebsiteIconUrl = $null; IconRequest = $null; IconTimer = $iconTimer; CloseAfterIconLookup = $false
         PendingWebsiteSave = $null; UpdatingWebsite = $false
         ActivitySpinner = $activitySpinner
@@ -4052,9 +4084,10 @@ function New-EeaSetupForm {
 
     $appList.Add_SelectedIndexChanged({
         param($Sender, $EventArgs)
-        if ($Sender.SelectedIndex -lt 0) { return }
         $ownerForm = $Sender.FindForm()
         $ui = $ownerForm.Tag
+        $ui.PinButton.Enabled = $Sender.SelectedIndex -ge 0
+        if ($Sender.SelectedIndex -lt 0) { return }
         $selected = $Sender.SelectedItem
         Stop-EeaWebsiteIconLookup $ownerForm
         $ui.NameInput.Text = $selected.Name
@@ -4151,6 +4184,17 @@ function New-EeaSetupForm {
         }
         catch { Show-EeaFormError $ownerForm $_ }
         finally { $ownerForm.UseWaitCursor = $false; $ui.SaveButton.Enabled = $null -eq $ui.IconRequest }
+    })
+    $pinButton.Add_Click({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.FindForm()
+        $ui = $ownerForm.Tag
+        if ($ui.AppList.SelectedIndex -lt 0) { return }
+        try {
+            $null = Show-EeaTaskbarShortcut -AppName $ui.AppList.SelectedItem.Name -Context $ui.Context -Confirm:$false
+            $ui.StatusLabel.Text = 'Finish pinning in File Explorer.'
+        }
+        catch { Show-EeaFormError $ownerForm $_ }
     })
     $openButton.Add_Click({
         param($Sender, $EventArgs)

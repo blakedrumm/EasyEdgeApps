@@ -18,6 +18,16 @@ $context = [pscustomobject]@{
 }
 $form = $null
 $script:ApproveChange = $false
+$script:ExplorerRequests = New-Object 'Collections.Generic.List[object]'
+$script:FailExplorer = $false
+
+function Start-Process {
+    [CmdletBinding()]
+    param([string]$FilePath, [string]$ArgumentList)
+    Assert-Gui ($FilePath -ceq (Join-Path ([Environment]::GetFolderPath('Windows')) 'explorer.exe')) 'GUI tests must never launch an unmocked application.'
+    if ($script:FailExplorer) { throw 'Synthetic Explorer failure.' }
+    $script:ExplorerRequests.Add([pscustomobject]@{ FilePath = $FilePath; Arguments = $ArgumentList })
+}
 
 function Confirm-EeaChange {
     param($Form, [string]$Message, [string]$Title)
@@ -32,6 +42,32 @@ function Show-EeaFormError {
 function Assert-Gui {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
+}
+
+function Test-GuiTaskbar {
+    param($Form, $Context)
+    $ui = $Form.Tag
+    $paths = Get-EeaPaths $Context 'My News'
+    $manifestHash = (Get-FileHash -LiteralPath $paths.Manifest).Hash
+    $savedWebsite = $ui.UrlInput.Text
+    Assert-Gui ($ui.PinButton.Enabled -and $ui.PinButton.Image.Tag -ceq 'Pin' -and $ui.PinButton.AccessibleName -ceq 'Pin saved website to taskbar') 'A saved website must expose an accessible taskbar command with its pin icon.'
+    $ui.AppList.SelectedIndex = -1
+    Assert-Gui (-not $ui.PinButton.Enabled) 'Clearing selection must disable taskbar pinning.'
+    $ui.AppList.SelectedIndex = 0
+    $ui.UrlInput.Text = 'https://example.com/unsaved-taskbar-edit'
+    $ui.PinButton.PerformClick()
+    Assert-Gui ($script:ExplorerRequests.Count -eq 1 -and $script:ExplorerRequests[0].Arguments -ceq ('/select,"{0}"' -f $paths.StartMenu)) 'The pin button must select the owned saved shortcut in Explorer without launching the website.'
+    Assert-Gui ($ui.StatusLabel.Text -ceq 'Finish pinning in File Explorer.') 'Pinning assistance must name the remaining Windows action, not report that a pin was created.'
+    Assert-Gui ($ui.UrlInput.Text -ceq 'https://example.com/unsaved-taskbar-edit' -and (Get-FileHash -LiteralPath $paths.Manifest).Hash -ceq $manifestHash) 'Pinning assistance must leave unsaved edits and saved website data unchanged.'
+    $script:FailExplorer = $true
+    try {
+        $ui.PinButton.PerformClick()
+        Assert-Gui ($ui.PinButton.Enabled -and $ui.StatusLabel.Text -ceq 'FAILED: Synthetic Explorer failure.') 'An Explorer failure must be reported without disabling further use of setup.'
+    }
+    finally { $script:FailExplorer = $false }
+    $ui.UrlInput.Text = $savedWebsite
+    $ui.StatusLabel.Text = 'Saved: My News'
+    Write-Host 'PASS: Taskbar button selection, accessible icon, saved-shortcut handoff, unsaved edit preservation, and Explorer failure handling without taskbar changes.'
 }
 
 function New-GuiIconRequest {
@@ -386,6 +422,9 @@ try {
     [Windows.Forms.Application]::DoEvents()
     $ui = $form.Tag
     Assert-Gui (-not (Test-Path -LiteralPath $context.Root)) 'Opening setup must not create app data.'
+    Assert-Gui (-not $ui.PinButton.Enabled) 'Taskbar pinning must remain unavailable until a saved website is selected.'
+    $ui.PinButton.PerformClick()
+    Assert-Gui ($script:ExplorerRequests.Count -eq 0) 'The disabled pin command must not open Explorer.'
     Test-GuiSpaceRenderer
     Test-GuiSpaceLifecycle $form
     Assert-Gui ($ui.AppList.Items.Count -eq 0) 'New setup should have no websites.'
@@ -461,6 +500,7 @@ try {
     Assert-Gui ($ui.NameInput.ReadOnly -and $ui.OpenButton.Enabled -and $ui.RemoveButton.Enabled) 'Selection must enable the correct actions.'
     Assert-Gui ($ui.SaveButton.Image.Tag -ceq 'Save') 'Selecting a saved app must show the save command icon.'
     Assert-Gui ($null -ne $ui.IconPreview.Image) 'A generated icon must render in the setup window.'
+    Test-GuiTaskbar -Form $form -Context $context
     Test-GuiWebsiteIcon -Form $form -Context $context
     $ui.UrlInput.Text = 'https://example.com/updated#/home'
     $ui.SaveButton.PerformClick()
@@ -480,7 +520,7 @@ try {
         Assert-ControlLayout $form
         $brandBounds = $form.RectangleToClient($ui.BrandPicture.RectangleToScreen($ui.BrandPicture.ClientRectangle))
         Assert-Gui ($form.ClientRectangle.Contains($brandBounds)) 'The application logo must stay visible at large text sizes.'
-        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.PinButton, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
             $ui.EditorViewport.ScrollControlIntoView($requiredControl)
             [Windows.Forms.Application]::DoEvents()
             $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
@@ -501,12 +541,24 @@ try {
             }
             finally { $capture.Dispose() }
         }
+        $savedStatus = $ui.StatusLabel.Text
+        $ui.PinButton.PerformClick()
+        $form.PerformLayout()
+        [Windows.Forms.Application]::DoEvents()
+        Assert-ControlLayout $form
+        foreach ($requiredControl in @($ui.NotesInput, $ui.PinButton, $ui.SaveButton)) {
+            $ui.EditorViewport.ScrollControlIntoView($requiredControl)
+            [Windows.Forms.Application]::DoEvents()
+            $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
+            Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($controlBounds)) ('Taskbar instructions must preserve control reachability: ' + $requiredControl.Text)
+        }
+        $ui.StatusLabel.Text = $savedStatus
         Write-Host "PASS: Native setup layout at $pointSize-point text."
     }
     $ui.NewButton.PerformClick()
     Assert-Gui (-not $ui.NameInput.ReadOnly -and $ui.NameInput.Text -eq '') 'New website must reset the editor.'
     Assert-Gui ($ui.SaveButton.Image.Tag -ceq 'Add') 'A new app must restore the add command icon.'
-    Assert-Gui (-not $ui.OpenButton.Enabled -and -not $ui.RemoveButton.Enabled) 'New website must not act on the previous selection.'
+    Assert-Gui (-not $ui.OpenButton.Enabled -and -not $ui.RemoveButton.Enabled -and -not $ui.PinButton.Enabled) 'New website must not act on the previous selection.'
     $ui.NameInput.Text = 'My News'
     $ui.UrlInput.Text = 'https://example.com/unwanted-change'
     $ui.SaveButton.PerformClick()
@@ -515,6 +567,7 @@ try {
     $script:ApproveChange = $true
     $ui.RemoveButton.PerformClick()
     Assert-Gui ($ui.AppList.Items.Count -eq 0) 'Confirmed removal must refresh the list.'
+    Assert-Gui (-not $ui.PinButton.Enabled) 'Removing a website must disable the taskbar command for that selection.'
     Assert-Gui ($null -eq (Read-EeaManifest $context 'My News')) 'Confirmed removal must remove owned settings.'
     $ui.UrlInput.Text = 'https://example.com/'
     $script:NextIconRequest = New-GuiIconRequest ([byte[]]@(0))
