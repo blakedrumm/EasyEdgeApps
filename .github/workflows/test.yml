@@ -28,3 +28,28 @@ jobs:
           persist-credentials: false
       - name: Parse, safety, portability, command line, and native dialogs
         run: ./tests/Invoke-Tests.ps1
+
+  installer:
+    name: Per-user MSI
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build launcher and validate MSI
+        run: pwsh.exe -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tools/Build-Installer.ps1
+      - name: Per-user install, launcher, upgrade, repair, and uninstall
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath ./artifacts -Filter 'EasyEdgeApps-*-x64.msi' -File)
+          if ($packages.Count -ne 1) { throw 'Expected exactly one installer.' }
+          foreach ($hostExecutable in @('powershell.exe', 'pwsh.exe')) {
+              & $hostExecutable -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-EasyEdgeAppsInstaller.ps1 -MsiPath $packages[0].FullName -InstallLifecycle
+              if ($LASTEXITCODE -ne 0) { throw "MSI lifecycle failed in $hostExecutable." }
+          }

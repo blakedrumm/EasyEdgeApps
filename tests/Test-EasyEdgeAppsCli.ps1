@@ -42,7 +42,7 @@ if ($CommandCase -ne 'All') {
             $secret.Dispose()
             $secret = $restoredSecret
         }
-        if ($CommandCase -in @('UnattendedOpen', 'UnattendedInstall')) {
+        if ($CommandCase -in @('UnattendedOpen', 'UnattendedInstall', 'OpenWithProfile')) {
             $global:EeaCliTestLaunch = $null
             function Start-Process {
                 [CmdletBinding()]
@@ -52,6 +52,10 @@ if ($CommandCase -ne 'All') {
         }
         $commandOptions = switch ($CommandCase) {
             Install { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; Notes = 'Synthetic CLI notes.'; Confirm = $false; Quiet = $true } }
+            InstallWithProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; EdgeProfile = 'Profile 1'; Unattended = $true } }
+            ClearProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; EdgeProfile = ''; Unattended = $true } }
+            InvalidProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/'; EdgeProfile = 'Profile 1" --injected'; Unattended = $true } }
+            OpenWithProfile { @{ Action = 'Open'; Name = 'CLI website'; Unattended = $true } }
             ImplicitInstall { @{ Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; Confirm = $false; Quiet = $true } }
             InstallWhatIf { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/'; WhatIf = $true } }
             List { @{ Action = 'List' } }
@@ -101,8 +105,10 @@ if ($CommandCase -ne 'All') {
         $global:LASTEXITCODE = if ($commandOptions.ContainsKey('Unattended')) { 47 } else { 0 }
         & $dispatcherPath @commandOptions | ConvertTo-Json -Depth 8 -Compress
         $commandExitCode = $LASTEXITCODE
-        if ($CommandCase -in @('UnattendedOpen', 'UnattendedInstall') -and $commandExitCode -eq 0) {
-            Assert-Cli ($null -ne $global:EeaCliTestLaunch -and $global:EeaCliTestLaunch.FilePath -ceq (Find-EeaEdge) -and $global:EeaCliTestLaunch.ArgumentList -ceq '--app="https://example.com/cli?view=large#/home" --start-maximized') 'Explicit unattended browser commands must use the discovered Edge executable and validated app arguments.'
+        if ($CommandCase -in @('UnattendedOpen', 'UnattendedInstall', 'OpenWithProfile') -and $commandExitCode -eq 0) {
+            $expectedArguments = '--app="https://example.com/cli?view=large#/home" --start-maximized'
+            if ($CommandCase -ceq 'OpenWithProfile') { $expectedArguments += ' --profile-directory="Profile 1"' }
+            Assert-Cli ($null -ne $global:EeaCliTestLaunch -and $global:EeaCliTestLaunch.FilePath -ceq (Find-EeaEdge) -and $global:EeaCliTestLaunch.ArgumentList -ceq $expectedArguments) 'Explicit unattended browser commands must use the discovered Edge executable and validated app arguments.'
         }
     }
     finally {
@@ -196,6 +202,18 @@ try {
     $null = Invoke-CliCase Fallback $sourceDirectory $missingFile -ExpectedExit 1
     Assert-Cli (-not [IO.File]::Exists($missingFile)) 'Invalid export parameters must leave no output.'
     Write-Host 'PASS: CLI install/list compatibility, WhatIf, notes, readable/encrypted export, and missing-password handling.'
+
+    $profileDirectory = Join-Path $testRoot 'Profiles'
+    $profileContext = New-CliContext $profileDirectory
+    $null = Invoke-CliCase InvalidProfile $profileDirectory -ExpectedExit 1
+    Assert-Cli (-not [IO.Directory]::Exists($profileDirectory)) 'An invalid profile identifier must fail before creating app data.'
+    $null = Invoke-CliCase InstallWithProfile $profileDirectory
+    Assert-Cli ((Get-EeaStateProfile (Read-EeaManifest $profileContext 'CLI website')) -ceq 'Profile 1') 'Install must forward the explicit profile through the public dispatcher.'
+    $null = Invoke-CliCase OpenWithProfile $profileDirectory
+    $null = Invoke-CliCase ClearProfile $profileDirectory
+    Assert-Cli ((Get-EeaStateProfile (Read-EeaManifest $profileContext 'CLI website')) -ceq '') 'An explicitly empty profile must restore Edge-controlled selection.'
+    $null = Invoke-CliCase UnattendedOpen $profileDirectory
+    Write-Host 'PASS: Public profile override, saved-profile launch, explicit clearing, and unsafe-profile rejection.'
 
     Assert-Cli ((Invoke-CliCase ImportPreview $destinationDirectory $standardFile).Contains('Add')) 'Import preview must return structured changes.'
     $null = Invoke-CliCase ImportWhatIf $destinationDirectory $standardFile

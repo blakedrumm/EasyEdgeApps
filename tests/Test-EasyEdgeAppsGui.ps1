@@ -302,7 +302,10 @@ function Test-GuiSpaceLifecycle {
         Assert-Gui ($Form.SceneTime -gt $initialTime) ('The timer must advance the scene independently of the mouse. Running: ' + $Form.IsAnimationRunning + '; elapsed milliseconds: ' + $advanceClock.ElapsedMilliseconds)
         $Form.Tag.MotionCheck.Checked = $false
         Assert-Gui (-not $Form.MotionEnabled -and -not $Form.IsAnimationRunning) 'The Motion checkbox must pause the timer.'
+        Assert-Gui (-not (Get-EeaSettings -Context $Form.Tag.Context).MotionEnabled) 'An explicit Motion toggle must persist the paused preference.'
         $Form.Tag.MotionCheck.Checked = $true
+        $settingsPath = Join-Path $Form.Tag.Context.Root 'settings.json'
+        $settingsHash = (Get-FileHash -LiteralPath $settingsPath).Hash
         Invoke-GuiFormEvent $Form 'OnMouseLeave'
         Invoke-GuiFormEvent $Form 'OnDeactivate'
         Assert-Gui $Form.IsAnimationRunning 'A visible window must keep animating after the mouse leaves and focus moves elsewhere.'
@@ -335,6 +338,7 @@ function Test-GuiSpaceLifecycle {
         [void]$preferences.Invoke($Form, [object[]]@($true, $true, $false))
         Assert-Gui (-not $Form.SceneEnabled -and -not $Form.IsAnimationRunning -and $Form.BackColor -eq [Drawing.SystemColors]::Window -and $Form.Tag.NameInput.BackColor -eq [Drawing.SystemColors]::Window) 'High contrast must remove decorative rendering and restore system-colored controls.'
         Assert-Gui $Form.MotionEnabled 'Accessibility changes must not overwrite the user motion preference.'
+        Assert-Gui ((Get-EeaSettings -Context $Form.Tag.Context).MotionEnabled -and (Get-FileHash -LiteralPath $settingsPath).Hash -ceq $settingsHash) 'Programmatic accessibility synchronization must not rewrite the saved Motion preference.'
         Write-Host 'PASS: Animation without mouse input or focus, pause/resume, resize/hidden/minimized suspension, and simulated accessibility/remote preferences.'
     }
     finally { $Form.RefreshPreferences(); $Form.MotionEnabled = $false }
@@ -381,6 +385,7 @@ try {
     $form.Show()
     [Windows.Forms.Application]::DoEvents()
     $ui = $form.Tag
+    Assert-Gui (-not (Test-Path -LiteralPath $context.Root)) 'Opening setup must not create app data.'
     Test-GuiSpaceRenderer
     Test-GuiSpaceLifecycle $form
     Assert-Gui ($ui.AppList.Items.Count -eq 0) 'New setup should have no websites.'
@@ -401,7 +406,6 @@ try {
     }
     Assert-Gui ($symbolPixels -gt 10) 'Windows command icons must render nonblank pixels.'
     Assert-Gui ($ui.SaveButton.BackColor -eq [Drawing.SystemColors]::Highlight -and $ui.SaveButton.ForeColor -eq [Drawing.SystemColors]::HighlightText) 'The primary action must use accessible Windows selection colors.'
-    Assert-Gui (-not (Test-Path -LiteralPath $context.Root)) 'Opening setup must not create app data.'
     Assert-Gui ($null -ne $form.AcceptButton -and $null -ne $form.CancelButton) 'Enter and Escape need default actions.'
     $wordBackspace = [Windows.Forms.Keys]::Control -bor [Windows.Forms.Keys]::Back
     foreach ($textInput in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput)) {
@@ -482,7 +486,7 @@ try {
             $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
             Assert-Gui ($ui.EditorViewport.ClientRectangle.Contains($controlBounds)) ('Required control must be reachable: ' + $requiredControl.Text)
         }
-        foreach ($toolButton in @($ui.ExportButton, $ui.ImportButton, $ui.FavoritesButton, $ui.CheckButton, $ui.CloseButton, $ui.MotionCheck)) {
+        foreach ($toolButton in @($ui.ExportButton, $ui.ImportButton, $ui.FavoritesButton, $ui.CheckButton, $ui.CloseButton, $ui.MotionCheck, $ui.SettingsButton)) {
             $buttonBounds = $form.RectangleToClient($toolButton.RectangleToScreen($toolButton.ClientRectangle))
             Assert-Gui ($form.ClientRectangle.Contains($buttonBounds)) ('Tool command must be visible: ' + $toolButton.Text)
         }

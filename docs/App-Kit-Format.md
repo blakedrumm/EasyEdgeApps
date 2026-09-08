@@ -1,6 +1,6 @@
 # App Kit Format
 
-This is the version 1 App Kit contract introduced in Easy Edge Apps 1.1.0. Runtime delivery remains one self-contained PowerShell script; optional website icon retrieval uses embedded SVG dependencies as well as Windows/.NET. The same portable data works in Windows PowerShell 5.1 and PowerShell 7 on Windows. Encrypted exports remain experimental and require independent security review before production use.
+This is the version 1 App Kit contract introduced in Easy Edge Apps 1.1.0. The application remains a self-contained PowerShell script, available portably or inside the optional MSI added in 1.3.0; website icon retrieval uses embedded SVG dependencies as well as Windows/.NET. The same portable data works in Windows PowerShell 5.1 and PowerShell 7 on Windows. Encrypted exports remain experimental and require independent security review before production use.
 
 ## Standard payload
 
@@ -26,6 +26,8 @@ A standard kit is a UTF-8 JSON object. A leading UTF-8 BOM is accepted for files
 ```
 
 Required kit fields are `Product`, `SchemaVersion`, `Name`, and `Apps`. Required app fields are `Name`, `Url`, `Desktop`, `StartMenu`, and `Icon`. `Notes` is the only optional field at either level and defaults to an empty string. Field names, product markers, and enum values are case-sensitive. Unknown fields, duplicate JSON fields (including case-only variants), and type metadata are rejected. There are no imported paths or commands.
+
+Version 1.3.0 does not change this schema. Global preferences, update timestamps, diagnostic logs, installer registration, and Edge profile identifiers are not portable kit fields. A local app manifest may store an optional validated `EdgeProfile`, but exports omit it and kits containing that field are rejected. An import preserves an existing app's local profile; newly created apps use the destination user's default. Kit Desktop/Start menu choices remain authoritative for placement.
 
 | Field | Validation |
 | --- | --- |

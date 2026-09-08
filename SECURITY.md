@@ -12,15 +12,31 @@ Do not include credentials, tokens, personal website addresses, account screensh
 
 ## Trust model
 
-- Only run a reviewed copy obtained from the official repository or its releases. The PowerShell script is unsigned.
+- Only run a reviewed copy obtained from the official repository or its releases. The PowerShell script, MSI, and manager launcher are unsigned. Checksums do not authenticate a publisher.
 - Installation is current-user only and intentionally requires no administrator elevation.
-- HTTPS is preferred; explicit HTTP destinations are supported and unencrypted. Passwords and browser flags cannot be supplied as launch options.
-- No remote code or dependencies are downloaded by setup. Website icon retrieval and scheme resolution, introduced in version 1.2.0, contact submitted destinations only after an explicit command. SVG rendering dependencies and their license notices are embedded.
+- HTTPS is preferred; explicit HTTP destinations are supported and unencrypted. Passwords and arbitrary browser flags cannot be supplied as launch options. Version 1.3.0 permits only validated local profile identifiers as an additional launch argument.
+- No remote code or dependencies are downloaded by setup. Website icon retrieval and scheme resolution contact submitted destinations only after an explicit command. Optional update checks contact the fixed official GitHub release endpoint, manually or after the user enables automatic checks. SVG rendering dependencies and their license notices are embedded.
 - URLs are stored locally, including any query strings or fragments. Never configure a URL containing a secret.
 - Saved metadata is validated; persistent paths do not control writes or deletion. Existing artifacts are checked before replacement or removal.
 - Ownership checks are accident-prevention measures, not a sandbox against another process running as the same user, an administrator, or a compromised browser.
-- Browser security, profile selection, cookies, and credentials remain in Edge's control. An app window is not kiosk isolation.
+- Browser security, cookies, and credentials remain in Edge's control. A helper may save a local launch-profile identifier, without reading or copying that profile's sign-in data. An app window is not kiosk isolation.
 - Multi-file changes support caught-error rollback, not guaranteed power-failure atomicity. Preserve recovery files when setup requests help.
+
+## Installer and updates
+
+The x64 MSI is per-user. It installs program files under `%LOCALAPPDATA%\Programs\Easy Edge Apps`, registers the manager with Windows Installer, and writes its own HKCU installer markers and Start menu shortcut. Application data stays separately under `%LOCALAPPDATA%\EasyEdgeApps`. Upgrade and uninstall do not remove saved websites, website shortcuts, preferences, logs, or browser data. Windows Installer manages its own registration and package cache. The package does not launch the application, download code, install services, or create scheduled tasks during installation.
+
+The Windows launcher uses the absolute Windows PowerShell path and its adjacent script, accepts no forwarded command-line options, requests no elevation, and uses a process-only execution-policy override. It does not change saved policy or bypass managed application controls. Website shortcuts bypass this launcher and open Edge directly. Do not disable Windows security features to install or run unsigned files. WiX 5.0.2 is a pinned build dependency, not an end-user runtime requirement; its license and exact source attribution are included in the installed notices.
+
+Update checking is off by default. Enabling it permits a check when setup opens or preferences are saved, at most once per 24 hours, including failed attempts. A manual check bypasses that delay. Requests use normal TLS validation, no cookies, authorization, referrer, default Windows credentials, or proxy credentials, and only `https://api.github.com/repos/blakedrumm/EasyEdgeApps/releases/latest`. Redirects are rejected before following them. Responses are limited to 64 KiB, strict UTF-8/data-only JSON, and the existing 8-second network deadline. Only stable published version tags and the exact matching official release-page URL are accepted.
+
+The checker does not execute release text, download assets, run an installer, or update the portable script. A detected update enables a button that opens the validated official release page in the default browser. Installation remains a separate user action. GitHub and network infrastructure can observe requests; no saved app names, URLs, notes, profile selections, logs, or browser data are sent. Repository ownership and GitHub's release metadata remain trust dependencies, not cryptographic update authentication.
+
+## Preferences and diagnostics
+
+Preferences use a strict, bounded version-1 JSON schema and atomic replacement under the existing per-user lock. Only `Default`, `Profile ` followed by one to six digits, or an empty profile identifier are accepted. No paths or arbitrary switches are allowed. Existing apps retain their stored profile when the default changes; global preferences and profile identifiers are not included in App Kits.
+
+Debug logging is off by default and local only. It accepts allowlisted event/outcome names and bounded exception type names, with UTC time and application/host versions. It does not accept free-form messages, stack traces, URLs, notes, passwords, or browser content. Current events cover setup and settings, GUI app operations/errors, and update checks, not all CLI output. Logs rotate around 256 KiB and retain one previous file. Clearing logs requires explicit approval and deletes only the two known log files. Disabling logging leaves existing files in place. Logs are not encrypted and remain accessible to the same user and administrators; inspect even limited diagnostics before sharing.
 
 ## Website icon retrieval
 
@@ -28,7 +44,7 @@ Do not include credentials, tokens, personal website addresses, account screensh
 
 For a setup address without a scheme, **Get icon** and **Add website** or **Save changes** first issue a credential-free HEAD request to HTTPS. Any received HTTPS response, even an HTTP error status, keeps HTTPS. Connection failure can fall back to HTTP; certificate or TLS authentication failure does not. Explicit schemes are preserved without probing. HTTPS icon links and redirects never downgrade to HTTP. HTTP fallback is shown in the editor and direct GUI saves require confirmation. An active network attacker can cause connection failure, so automatic fallback is not proof of HTTP safety. Do not send passwords or sensitive information to HTTP sites. CLI operations and kits require explicit schemes, do not probe, and rely on the caller's approval of those destinations. Favorites import stays HTTPS-only.
 
-Nothing is requested automatically while typing, starting setup, checking apps, or importing a kit. HTML discovery reads at most a 512 KiB prefix; it does not reject a page solely because the complete page is larger. Image downloads have no fixed byte-size cutoff. Streamed and decompressed bytes go to a uniquely named, exclusive temporary file opened with `DeleteOnClose`, then are resized into a small icon. Disk capacity and native decoder resources can still be exhausted by a hostile or excessively large response. Temporary image files are not encrypted, and the application's same-user filesystem trust boundary still applies.
+No website or icon is requested automatically while typing, starting setup, checking apps, or importing a kit. Separately enabled update checks contact GitHub only. HTML discovery reads at most a 512 KiB prefix; it does not reject a page solely because the complete page is larger. Image downloads have no fixed byte-size cutoff. Streamed and decompressed bytes go to a uniquely named, exclusive temporary file opened with `DeleteOnClose`, then are resized into a small icon. Disk capacity and native decoder resources can still be exhausted by a hostile or excessively large response. Temporary image files are not encrypted, and the application's same-user filesystem trust boundary still applies.
 
 Scheme probes have a 5-second cancellation deadline, HTML requests 8 seconds, and image transfers 60 seconds, within a 90-second lookup cancellation budget. Fetched resources allow at most three redirects without embedded credentials. Cancellation is cooperative; synchronous image decoding is not a forcibly terminated sandbox. Pending work runs outside the UI thread, with an activity spinner and cancellation control. Closing the download stream deletes its temporary file on success, conversion failure, or cancellation.
 

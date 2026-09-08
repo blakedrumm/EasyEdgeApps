@@ -14,6 +14,24 @@ $script:ApproveChange = $false
 $script:KitFileChoice = $null
 $script:PathRequests = 0
 $script:LastDialogError = ''
+$script:NextUpdateRequest = $null
+$script:UpdateRequestsStarted = 0
+
+function New-ToolUpdateRequest {
+    param([string]$Version = '1.4.0', [switch]$Fail)
+    $release = [pscustomobject]@{ tag_name = ('v' + $Version); html_url = ('https://github.com/blakedrumm/EasyEdgeApps/releases/tag/v' + $Version); draft = $false; prerelease = $false }
+    $pipeline = [pscustomobject]@{ Info = (ConvertTo-EeaUpdateInfo $release); Fail = [bool]$Fail; Disposed = $false }
+    $pipeline | Add-Member ScriptMethod EndInvoke { param($Pending) if ($this.Fail) { throw 'Synthetic update check failure.' }; return $this.Info }
+    $pipeline | Add-Member ScriptMethod Stop { }
+    $pipeline | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+    return [pscustomobject]@{ PowerShell = $pipeline; AsyncResult = [pscustomobject]@{ IsCompleted = $false }; Cancellation = (New-Object Threading.CancellationTokenSource) }
+}
+
+function Start-EeaUpdateRequest {
+    Assert-ToolGui ($null -ne $script:NextUpdateRequest) 'GUI tests must not use the live update service.'
+    $script:UpdateRequestsStarted++
+    return $script:NextUpdateRequest
+}
 
 function Assert-ToolGui {
     param([bool]$Condition, [string]$Message)
@@ -284,6 +302,123 @@ try {
     $favoritesForm.Tag.AllCheck.Checked = $true
     Assert-ToolGui (-not $favoritesForm.Tag.ApplyButton.Enabled) 'Already imported Favorites must not be duplicated.'
     Write-Host "PASS: Profile selection, nested Favorites, unavailable links, explicit consent, and read-only Edge data on PowerShell $($PSVersionTable.PSVersion)."
+    $settingsContext = New-ToolTestContext 'Settings'
+    [void][IO.Directory]::CreateDirectory((Join-Path $edgeRoot 'Profile 2'))
+    [IO.File]::WriteAllText((Join-Path $edgeRoot 'Profile 2\Preferences'), '{}')
+    $settingsOwner = New-EeaSetupForm -Context $settingsContext -EdgeUserDataPath $edgeRoot
+    Show-ToolTestForm $settingsOwner
+    $settingsForm = New-EeaSettingsForm -OwnerForm $settingsOwner
+    Show-ToolTestForm $settingsForm
+    Assert-ToolGui ($script:UpdateRequestsStarted -eq 0 -and -not [IO.Directory]::Exists($settingsContext.Root)) 'Opening setup or Settings with default preferences must not write files or contact GitHub.'
+    Assert-ToolGui ($settingsForm.Tag.UpdateLabel.Text -ceq 'Not checked yet.') 'Opening Settings must not imply that an update check has already happened.'
+    Assert-ToolGui ($settingsForm.Tag.ProfileInput.Items.Count -eq 4) 'The default-profile picker must include local profiles without bookmarks and the Edge-controlled option.'
+    $settingsForm.Tag.AutoUpdateCheck.Checked = $true
+    $settingsForm.Tag.DebugCheck.Checked = $true
+    $settingsForm.Close()
+    Assert-ToolGui (-not [IO.Directory]::Exists($settingsContext.Root) -and -not $settingsOwner.Tag.Settings.AutomaticUpdateChecks) 'Cancelling Settings must discard unsaved toggles.'
+    $settingsForm.Dispose()
+    $settingsForm = New-EeaSettingsForm -OwnerForm $settingsOwner
+    Show-ToolTestForm $settingsForm
+    Test-ToolFormLayout $settingsForm 'settings'
+    $settingsUi = $settingsForm.Tag
+    $settingsUi.OpenLogsButton.PerformClick()
+    Assert-ToolGui ($settingsUi.StatusLabel.Text -ceq 'No diagnostic logs yet.') 'Opening a missing log folder must not create files or launch Explorer.'
+    foreach ($outcome in @('Available', 'Current', 'Failure', 'Cancel')) {
+        $versionText = if ($outcome -eq 'Current') { (Get-EeaVersion).ToString() } else { '1.4.0' }
+        $script:NextUpdateRequest = New-ToolUpdateRequest -Version $versionText -Fail:($outcome -eq 'Failure')
+        $request = $script:NextUpdateRequest
+        $settingsUi.CheckUpdatesButton.PerformClick()
+        Assert-ToolGui ($settingsUi.UpdateSpinner.IsBusy -and -not $settingsUi.CheckUpdatesButton.Enabled -and $settingsUi.CancelUpdateButton.Enabled) 'Checking updates must show activity and expose cancellation.'
+        if ($outcome -eq 'Cancel') { $settingsUi.CancelUpdateButton.PerformClick(); Assert-ToolGui $request.Cancellation.IsCancellationRequested 'Cancel must signal the pending update worker.' }
+        $request.AsyncResult.IsCompleted = $true
+        Complete-EeaFormUpdateCheck $settingsOwner
+        Assert-ToolGui ($request.PowerShell.Disposed -and -not $settingsUi.UpdateSpinner.IsBusy -and $settingsUi.CheckUpdatesButton.Enabled -and -not $settingsOwner.Tag.UpdateTimer.Enabled) 'Every update outcome must dispose the worker and restore controls.'
+        if ($outcome -eq 'Available') {
+            Assert-ToolGui ($settingsUi.DownloadUpdateButton.Visible -and $settingsOwner.Tag.DownloadUpdateItem.Available -and $settingsUi.UpdateLabel.Text.Contains('1.4.0')) 'New releases must expose the official download action and version.'
+            Test-ToolFormLayout $settingsForm 'settings-update'
+        }
+        if ($outcome -eq 'Current') { Assert-ToolGui (-not $settingsUi.DownloadUpdateButton.Visible -and $settingsUi.UpdateLabel.Text -ceq 'You have the latest version.') 'Current releases must show the up-to-date state without a download action.' }
+        if ($outcome -eq 'Failure') { Assert-ToolGui ($settingsUi.UpdateLabel.Text.StartsWith('Could not check')) 'Failures must leave a retryable update status.' }
+        if ($outcome -eq 'Cancel') { Assert-ToolGui ($settingsUi.UpdateLabel.Text -ceq 'Update check cancelled.') 'Cancelled checks must not offer stale pending release data.' }
+    }
+    $settingsUi.DesktopCheck.Checked = $false
+    $settingsUi.StartMenuCheck.Checked = $false
+    $settingsUi.ApplyButton.PerformClick()
+    Assert-ToolGui ($settingsUi.StatusLabel.Text.StartsWith('FAILED:') -and -not [IO.File]::Exists((Join-Path $settingsContext.Root 'settings.json'))) 'Invalid placement settings must not be saved.'
+    $settingsUi.StartMenuCheck.Checked = $true
+    $settingsUi.ProfileInput.SelectedIndex = 2
+    $settingsUi.MotionCheck.Checked = $false
+    $settingsUi.DebugCheck.Checked = $true
+    $settingsUi.TextSizeInput.SelectedItem = 14
+    $settingsUi.ApplyButton.PerformClick()
+    $savedSettings = Get-EeaSettings -Context $settingsContext
+    Assert-ToolGui (-not $savedSettings.DefaultDesktop -and $savedSettings.DefaultEdgeProfile -ceq 'Profile 1' -and $savedSettings.DebugLogging -and $savedSettings.TextSize -eq 14) 'Saved Settings must retain the selected profile, placement, diagnostics, and text size.'
+    Assert-ToolGui (-not $settingsOwner.MotionEnabled -and -not $settingsOwner.Tag.DesktopCheck.Checked -and $settingsOwner.Font.Size -eq 14 -and $settingsOwner.Tag.SettingsMenu.Font.Size -eq 14) 'Appearance and new-website placement preferences must apply to setup and its menu.'
+    $fontDialog = New-EeaScrollDialog -Title 'Font test' -ActionText '&Close' -ActionIcon Close
+    $forms.Add($fontDialog)
+    $fontDialog.StartPosition = [Windows.Forms.FormStartPosition]::Manual
+    $fontDialog.Location = New-Object Drawing.Point(-10000, -10000)
+    $fontDialog.ShowInTaskbar = $false
+    $script:ModalFontPoints = 0
+    $fontDialog.Add_Shown({ param($Sender, $EventArgs) $script:ModalFontPoints = $Sender.Font.Size; $Sender.DialogResult = [Windows.Forms.DialogResult]::Cancel; $Sender.Close() })
+    $null = Show-EeaModal -Owner $settingsOwner -Dialog $fontDialog
+    Assert-ToolGui ($script:ModalFontPoints -eq 14) 'Owned modal dialogs must inherit the saved setup text size.'
+    $logPath = Join-Path $settingsContext.Root 'Logs\debug.jsonl'
+    $script:ApproveChange = $false
+    $settingsUi.ClearLogsButton.PerformClick()
+    Assert-ToolGui ([IO.File]::Exists($logPath)) 'Declining log cleanup must preserve diagnostic files.'
+    $script:ApproveChange = $true
+    $settingsUi.ClearLogsButton.PerformClick()
+    Assert-ToolGui (-not [IO.File]::Exists($logPath)) 'Approved log cleanup must remove diagnostic files.'
+    $settingsUi.AutoUpdateCheck.Checked = $true
+    $requestCount = $script:UpdateRequestsStarted
+    $settingsUi.ApplyButton.PerformClick()
+    Assert-ToolGui ($script:UpdateRequestsStarted -eq $requestCount) 'Enabling automatic checks must respect a recent explicit check.'
+    $stampLock = [IO.FileStream]::new((Join-Path $settingsContext.Root 'last-update-check.txt'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+        Start-EeaFormUpdateCheck -Form $settingsOwner -Automatic
+        Assert-ToolGui ($script:UpdateRequestsStarted -eq $requestCount -and $null -eq $settingsOwner.Tag.UpdateRequest -and $settingsOwner.Tag.UpdateStatus -ceq 'Could not start the update check.') 'An unreadable update timestamp must leave setup usable without starting a request or raising an automatic-check dialog.'
+    }
+    finally { $stampLock.Dispose() }
+    Set-EeaUpdateCheckTime -Context $settingsContext -UtcNow ([DateTime]::UtcNow.AddDays(-2))
+    $script:NextUpdateRequest = New-ToolUpdateRequest
+    $request = $script:NextUpdateRequest
+    Start-EeaFormUpdateCheck -Form $settingsOwner -Automatic
+    Assert-ToolGui ($script:UpdateRequestsStarted -eq $requestCount + 1) 'An enabled and due automatic check must start once.'
+    $settingsUi.AutoUpdateCheck.Checked = $false
+    $settingsUi.ApplyButton.PerformClick()
+    Assert-ToolGui $request.Cancellation.IsCancellationRequested 'Disabling automatic updates must cancel its pending check.'
+    $request.AsyncResult.IsCompleted = $true
+    Complete-EeaFormUpdateCheck $settingsOwner
+    $settingsForm.Close()
+    $settingsForm.Dispose()
+    $settingsOwner.Tag.Settings.DefaultEdgeProfile = 'Profile 99'
+    $settingsForm = New-EeaSettingsForm -OwnerForm $settingsOwner
+    Show-ToolTestForm $settingsForm
+    Assert-ToolGui (-not $settingsForm.Tag.ProfileInput.SelectedItem.Available) 'A removed saved profile must be shown as unavailable, not silently replaced.'
+    $settingsForm.Tag.ApplyButton.PerformClick()
+    Assert-ToolGui ($settingsForm.Tag.StatusLabel.Text.StartsWith('FAILED:')) 'An unavailable profile must require an explicit replacement before saving settings.'
+    $script:NextUpdateRequest = New-ToolUpdateRequest
+    $request = $script:NextUpdateRequest
+    Start-EeaFormUpdateCheck $settingsOwner
+    $settingsOwner.Close()
+    Assert-ToolGui ($request.Cancellation.IsCancellationRequested -and -not $settingsOwner.IsDisposed) 'Closing setup must cancel a pending check and await its cleanup.'
+    $request.AsyncResult.IsCompleted = $true
+    Complete-EeaFormUpdateCheck $settingsOwner
+    Assert-ToolGui ($settingsOwner.IsDisposed -and $request.PowerShell.Disposed) 'Completed cancellation must permit setup to close without leaving an update worker.'
+    $damagedContext = New-ToolTestContext 'Damaged preferences'
+    [void][IO.Directory]::CreateDirectory($damagedContext.Root)
+    $damagedPath = Join-Path $damagedContext.Root 'settings.json'
+    [IO.File]::WriteAllText($damagedPath, '{damaged preferences')
+    $damagedHash = (Get-FileHash -LiteralPath $damagedPath).Hash
+    $damagedOwner = New-EeaSetupForm -Context $damagedContext -EdgeUserDataPath $edgeRoot
+    Show-ToolTestForm $damagedOwner
+    Assert-ToolGui ($damagedOwner.Tag.SettingsError -and -not $damagedOwner.Tag.Settings.AutomaticUpdateChecks -and (Get-FileHash -LiteralPath $damagedPath).Hash -ceq $damagedHash) 'Damaged preferences must fall back safely with a warning and no automatic repair or network check.'
+    $damagedDialog = New-EeaSettingsForm -OwnerForm $damagedOwner
+    Show-ToolTestForm $damagedDialog
+    $damagedDialog.Tag.ApplyButton.PerformClick()
+    Assert-ToolGui ((Get-EeaSettings -Context $damagedContext).Product -ceq 'EasyEdgeApps.Settings' -and -not $damagedOwner.Tag.SettingsError) 'Explicitly saving Settings must replace damaged preferences with a valid document and clear the warning state.'
+    Write-Host 'PASS: Settings layout, save/cancel, local profiles, updates, automatic-check preferences, diagnostics, and closing cleanup without live network access.'
 }
 finally {
     foreach ($form in $forms) { if (-not $form.IsDisposed) { $form.Close(); $form.Dispose() } }

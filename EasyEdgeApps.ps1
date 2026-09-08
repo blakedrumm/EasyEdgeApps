@@ -10,6 +10,9 @@ No administrator rights, external modules, dependency downloads,
 browser policy changes, or persistent execution-policy changes are required.
 Setup resolves scheme-free addresses HTTPS-first and can retrieve and resize
 website icons when explicitly requested. SVG rendering dependencies are embedded.
+Settings include optional GitHub update checks, local debug logging, appearance,
+and a default Edge profile for new websites. Automatic update checks are off by
+default and never download or install application code.
 .PARAMETER Url
 An absolute HTTPS or HTTP website address without embedded credentials.
 Command-line actions preserve the supplied scheme and do not probe websites.
@@ -31,6 +34,11 @@ all apps in a kit; repair still requires a selection.
 .PARAMETER Quiet
 Suppress routine messages and formatted previews, retaining result objects,
 errors, warnings, and WhatIf output. Does not approve changes by itself.
+.PARAMETER EdgeProfile
+For Install, use Default or Profile followed by a space and up to six digits to
+choose a local Edge profile. An explicitly empty value lets Edge choose. Without
+an override, existing apps retain their saved profile and new apps use Settings.
+For Favorites actions, this selects the local profile to read, not a launch profile.
 .EXAMPLE
 .\EasyEdgeApps.ps1
 
@@ -56,7 +64,7 @@ Back up the current user's saved websites for a replacement computer. Exports al
 
 Restore only My Mail from a previously reviewed, trusted App Kit. Adds or updates that named app for the current Windows user and leaves unselected apps alone. -Unattended approves the selected changes without prompts but retains validation and ownership checks. Run with -Preview first to review destinations without installing. Sign in to the website separately after restoring its shortcuts.
 .NOTES
-Version: 1.2.0
+Version: 1.3.0
 .LINK
 https://github.com/blakedrumm/EasyEdgeApps
 #>
@@ -260,9 +268,21 @@ function Get-EeaByteHash {
 
 function Get-EeaArguments {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Website)
+    param([Parameter(Mandatory = $true)][string]$Website, [AllowEmptyString()][string]$EdgeProfile = '')
 
-    return '--app="{0}" --start-maximized' -f (ConvertTo-EeaWebsite $Website)
+    $arguments = '--app="{0}" --start-maximized' -f (ConvertTo-EeaWebsite $Website)
+    $profileDirectory = ConvertTo-EeaProfileDirectory $EdgeProfile
+    if ($profileDirectory) { $arguments += ' --profile-directory="{0}"' -f $profileDirectory }
+    return $arguments
+}
+
+function Get-EeaStateProfile {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$State)
+
+    if ($null -eq $State.PSObject.Properties['EdgeProfile']) { return '' }
+    if ($State.EdgeProfile -isnot [string]) { throw 'The saved Edge profile is invalid.' }
+    return ConvertTo-EeaProfileDirectory $State.EdgeProfile
 }
 
 function Write-EeaShortcut {
@@ -328,6 +348,143 @@ function Get-EeaContext {
         Root = Join-Path ([Environment]::GetFolderPath('LocalApplicationData', $folderOption)) 'EasyEdgeApps'
         Desktop = [Environment]::GetFolderPath('DesktopDirectory', $folderOption)
         Programs = Join-Path ([Environment]::GetFolderPath('Programs', $folderOption)) 'Easy Edge Apps'
+    }
+}
+
+function Get-EeaVersion {
+    [CmdletBinding()]
+    param()
+
+    return [version]'1.3.0'
+}
+
+function New-EeaSettings {
+    [CmdletBinding()]
+    param()
+
+    return [pscustomobject]@{
+        Product = 'EasyEdgeApps.Settings'; SchemaVersion = 1
+        AutomaticUpdateChecks = $false; DebugLogging = $false
+        DefaultEdgeProfile = ''; DefaultDesktop = $true; DefaultStartMenu = $true
+        MotionEnabled = $true; TextSize = 12
+    }
+}
+
+function ConvertTo-EeaProfileDirectory {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    if ($Value -cnotmatch '\A(?:Default|Profile [0-9]{1,6})?\z') { throw 'Choose an available local Edge profile or let Edge choose.' }
+    return $Value
+}
+
+function ConvertTo-EeaSettings {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Settings)
+
+    $defaults = New-EeaSettings
+    if ($Settings -isnot [pscustomobject]) { throw 'Application settings must be a data object.' }
+    foreach ($property in $Settings.PSObject.Properties) {
+        if ($property.Name -cnotin @($defaults.PSObject.Properties.Name)) { throw 'An application setting is not supported.' }
+    }
+    foreach ($property in $defaults.PSObject.Properties) {
+        if ($null -eq $Settings.PSObject.Properties[$property.Name]) { throw 'An application setting is missing.' }
+    }
+    if ($Settings.Product -isnot [string] -or $Settings.Product -cne 'EasyEdgeApps.Settings' -or
+        $Settings.SchemaVersion -isnot [int] -or $Settings.SchemaVersion -ne 1) { throw 'This application settings version is not supported.' }
+    foreach ($propertyName in @('AutomaticUpdateChecks', 'DebugLogging', 'DefaultDesktop', 'DefaultStartMenu', 'MotionEnabled')) {
+        if ($Settings.$propertyName -isnot [bool]) { throw 'Application switches must be true or false.' }
+        $defaults.$propertyName = $Settings.$propertyName
+    }
+    if (-not $defaults.DefaultDesktop -and -not $defaults.DefaultStartMenu) { throw 'Choose Desktop or Start menu for new websites.' }
+    if ($Settings.DefaultEdgeProfile -isnot [string]) { throw 'The default Edge profile is invalid.' }
+    $defaults.DefaultEdgeProfile = ConvertTo-EeaProfileDirectory $Settings.DefaultEdgeProfile
+    if ($Settings.TextSize -isnot [int] -or $Settings.TextSize -notin @(12, 14, 16, 18)) { throw 'Choose a supported text size: 12, 14, 16, or 18.' }
+    $defaults.TextSize = $Settings.TextSize
+    return $defaults
+}
+
+function Get-EeaSettings {
+    [CmdletBinding()]
+    param($Context = (Get-EeaContext))
+
+    $settingsPath = Join-Path $Context.Root 'settings.json'
+    Assert-EeaSafePath $settingsPath
+    if (-not [IO.File]::Exists($settingsPath)) { return New-EeaSettings }
+    if ((Get-Item -LiteralPath $settingsPath -Force).Length -gt 16384) { throw 'The application settings file is too large.' }
+    return ConvertTo-EeaSettings (ConvertFrom-EeaJson ([IO.File]::ReadAllText($settingsPath, [Text.Encoding]::UTF8)))
+}
+
+function Save-EeaSettings {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)]$Settings, $Context = (Get-EeaContext))
+
+    $validated = ConvertTo-EeaSettings $Settings
+    if (-not $PSCmdlet.ShouldProcess('Easy Edge Apps preferences', 'Save preferences for the current Windows user')) { return }
+    Invoke-EeaLocked {
+        $settingsPath = Join-Path $Context.Root 'settings.json'
+        Assert-EeaSafePath $settingsPath
+        [void][IO.Directory]::CreateDirectory($Context.Root)
+        $stagedPath = Join-Path $Context.Root ('settings.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($validated | ConvertTo-Json -Compress))
+            $stream = [IO.FileStream]::new($stagedPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+            finally { $stream.Dispose() }
+            Write-EeaAtomicFile -Source $stagedPath -Destination $settingsPath
+        }
+        finally { if ([IO.File]::Exists($stagedPath)) { [IO.File]::Delete($stagedPath) } }
+    }
+    return $validated
+}
+
+function Write-EeaDebugLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('SetupOpened', 'SettingsSaved', 'AppSaved', 'AppRemoved', 'AppOpened', 'IconLookup', 'UpdateCheck', 'Error')][string]$Event,
+        [ValidateSet('Started', 'Succeeded', 'Failed', 'Cancelled')][string]$Outcome = 'Succeeded',
+        [ValidatePattern('\A[A-Za-z0-9_.]{0,160}\z')][string]$ErrorType = '',
+        $Settings,
+        $Context = (Get-EeaContext)
+    )
+
+    try {
+        if ($null -eq $Settings) { $Settings = Get-EeaSettings -Context $Context }
+        if (-not (ConvertTo-EeaSettings $Settings).DebugLogging) { return }
+        Invoke-EeaLocked {
+            $logDirectory = Join-Path $Context.Root 'Logs'
+            $logPath = Join-Path $logDirectory 'debug.jsonl'
+            $previousPath = Join-Path $logDirectory 'debug.previous.jsonl'
+            Assert-EeaSafePath $logPath
+            Assert-EeaSafePath $previousPath
+            [void][IO.Directory]::CreateDirectory($logDirectory)
+            if ([IO.File]::Exists($logPath) -and (Get-Item -LiteralPath $logPath -Force).Length -ge 262144) {
+                if ([IO.File]::Exists($previousPath)) { [IO.File]::Delete($previousPath) }
+                [IO.File]::Move($logPath, $previousPath)
+            }
+            $entry = [ordered]@{
+                Utc = [DateTime]::UtcNow.ToString('O'); Version = (Get-EeaVersion).ToString()
+                HostVersion = $PSVersionTable.PSVersion.ToString(); Event = $Event; Outcome = $Outcome; ErrorType = $ErrorType
+            } | ConvertTo-Json -Compress
+            $writer = [IO.StreamWriter]::new($logPath, $true, (New-Object Text.UTF8Encoding($false)))
+            try { $writer.WriteLine($entry) }
+            finally { $writer.Dispose() }
+        }
+    }
+    catch { }
+}
+
+function Clear-EeaDebugLogs {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param($Context = (Get-EeaContext))
+
+    if (-not $PSCmdlet.ShouldProcess('Easy Edge Apps diagnostic logs', 'Delete diagnostic logs without changing websites or preferences')) { return }
+    Invoke-EeaLocked {
+        foreach ($fileName in @('debug.jsonl', 'debug.previous.jsonl')) {
+            $logPath = Join-Path (Join-Path $Context.Root 'Logs') $fileName
+            Assert-EeaSafePath $logPath
+            if ([IO.File]::Exists($logPath)) { [IO.File]::Delete($logPath) }
+        }
     }
 }
 
@@ -439,7 +596,7 @@ function Read-EeaEdgeJson {
 
 function Get-EeaEdgeProfiles {
     [CmdletBinding()]
-    param([string]$UserDataPath = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'))
+    param([string]$UserDataPath = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'), [switch]$ForLaunchProfiles)
 
     Assert-EeaSafePath $UserDataPath
     if (-not [IO.Directory]::Exists($UserDataPath)) { return }
@@ -458,7 +615,9 @@ function Get-EeaEdgeProfiles {
     }
     foreach ($directory in @(Get-ChildItem -LiteralPath $UserDataPath -Directory -Force -ErrorAction Stop | Sort-Object Name)) {
         if ($directory.Name -cnotmatch '^(Default|Profile [0-9]+)$') { continue }
-        if (-not [IO.File]::Exists((Join-Path $directory.FullName 'Bookmarks'))) { continue }
+        if (-not [IO.File]::Exists((Join-Path $directory.FullName 'Bookmarks')) -and
+            (-not $ForLaunchProfiles -or -not [IO.File]::Exists((Join-Path $directory.FullName 'Preferences')))) { continue }
+        if ($ForLaunchProfiles -and $directory.Name -cnotmatch '^(Default|Profile [0-9]{1,6})$') { continue }
         $displayName = $directory.Name
         if ($null -ne $profileInfo -and $null -ne $profileInfo.PSObject.Properties[$directory.Name]) {
             $cachedProfile = $profileInfo.PSObject.Properties[$directory.Name].Value
@@ -638,6 +797,7 @@ function Read-EeaManifest {
         if ($null -ne $state.PSObject.Properties['Notes'] -and
             ($state.Notes -isnot [string] -or $state.Notes -cne (ConvertTo-EeaNotes $state.Notes))) { throw 'Invalid helper notes.' }
         if ($null -ne $state.PSObject.Properties['IconKind'] -and $state.IconKind -cnotin @('Generated', 'Custom')) { throw 'Invalid icon kind.' }
+        $null = Get-EeaStateProfile $state
         return $state
     }
     catch {
@@ -680,7 +840,7 @@ function Test-EeaOwnedShortcut {
     if (-not [IO.File]::Exists($Path)) { return $false }
     $shortcut = Read-EeaShortcut $Path
     return ($shortcut.Description -ceq ('EasyEdgeApps:' + $State.Id) -and
-        $shortcut.Arguments -ceq (Get-EeaArguments $State.Url) -and
+        $shortcut.Arguments -ceq (Get-EeaArguments $State.Url -EdgeProfile (Get-EeaStateProfile $State)) -and
         [StringComparer]::OrdinalIgnoreCase.Equals($shortcut.TargetPath, $State.EdgePath) -and
         [StringComparer]::OrdinalIgnoreCase.Equals($shortcut.IconLocation, ($Paths.Icon + ',0')))
 }
@@ -1248,6 +1408,7 @@ function Get-EeaWebsiteResponse {
         [Parameter(Mandatory = $true)][string]$Website,
         [Parameter(Mandatory = $true, ParameterSetName = 'Bytes')][ValidateRange(1, 1048576)][int]$MaximumBytes,
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None,
+        [switch]$DisallowRedirects,
         [Parameter(ParameterSetName = 'Bytes')][switch]$ReadPrefix,
         [Parameter(Mandatory = $true, ParameterSetName = 'File')][switch]$StreamToFile
     )
@@ -1266,6 +1427,7 @@ function Get-EeaWebsiteResponse {
             try {
                 $response = $Client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $requestCancellation.Token).GetAwaiter().GetResult()
                 if ([int]$response.StatusCode -in @(301, 302, 303, 307, 308)) {
+                    if ($DisallowRedirects) { throw 'This request cannot follow redirects.' }
                     if ($redirect -eq 3 -or $null -eq $response.Headers.Location) { throw 'Too many website redirects or a missing redirect address.' }
                     $redirectAddress = [uri](ConvertTo-EeaWebsite (New-Object Uri($address, $response.Headers.Location)).AbsoluteUri)
                     if ($address.Scheme -ceq 'https' -and $redirectAddress.Scheme -cne 'https') { throw 'An HTTPS request cannot redirect to HTTP.' }
@@ -1388,6 +1550,93 @@ function Start-EeaWebsiteIconRequest {
     catch { $pipeline.Dispose(); $cancellation.Dispose(); throw }
 }
 
+function ConvertTo-EeaUpdateInfo {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Release, [version]$CurrentVersion = (Get-EeaVersion))
+
+    foreach ($field in @('tag_name', 'html_url', 'draft', 'prerelease')) {
+        if ($null -eq $Release.PSObject.Properties[$field]) { throw 'GitHub returned incomplete release information.' }
+    }
+    if ($Release.tag_name -isnot [string] -or $Release.tag_name -cnotmatch '\Av(?:0|[1-9][0-9]{0,2})\.(?:0|[1-9][0-9]{0,2})\.(?:0|[1-9][0-9]{0,4})\z' -or
+        $Release.draft -isnot [bool] -or $Release.draft -or $Release.prerelease -isnot [bool] -or $Release.prerelease) { throw 'Only stable published releases are supported.' }
+    $latestVersion = [version]$Release.tag_name.Substring(1)
+    if ($latestVersion.Major -gt 255 -or $latestVersion.Minor -gt 255 -or $latestVersion.Build -gt 65535) { throw 'The release version is outside the supported range.' }
+    $releaseUrl = 'https://github.com/blakedrumm/EasyEdgeApps/releases/tag/' + $Release.tag_name
+    if ($Release.html_url -isnot [string] -or $Release.html_url -cne $releaseUrl) { throw 'The release address is not the official Easy Edge Apps repository.' }
+    return [pscustomobject]@{
+        CurrentVersion = $CurrentVersion.ToString(); LatestVersion = $latestVersion.ToString()
+        UpdateAvailable = $latestVersion -gt $CurrentVersion; ReleaseUrl = $releaseUrl
+    }
+}
+
+function Get-EeaUpdate {
+    [CmdletBinding()]
+    param([Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None, $Client)
+
+    $CancellationToken.ThrowIfCancellationRequested()
+    $ownsClient = $null -eq $Client
+    if ($ownsClient) { $Client = New-EeaWebsiteClient }
+    try {
+        $endpoint = 'https://api.github.com/repos/blakedrumm/EasyEdgeApps/releases/latest'
+        $response = Get-EeaWebsiteResponse -Client $Client -Website $endpoint -MaximumBytes 65536 -DisallowRedirects -CancellationToken $CancellationToken
+        $CancellationToken.ThrowIfCancellationRequested()
+        if ($response.Uri.AbsoluteUri -cne $endpoint) { throw 'The update service redirected to an unexpected address.' }
+        $encoding = New-Object Text.UTF8Encoding($false, $true)
+        $release = ConvertFrom-EeaJson $encoding.GetString($response.Bytes)
+        return ConvertTo-EeaUpdateInfo $release
+    }
+    finally { if ($ownsClient) { $Client.Dispose() } }
+}
+
+function Start-EeaUpdateRequest {
+    [CmdletBinding()]
+    param($Client)
+
+    $cancellation = New-Object Threading.CancellationTokenSource
+    $pipeline = [PowerShell]::Create()
+    try {
+        $definitions = foreach ($functionName in @('Get-EeaVersion', 'ConvertTo-EeaWebsite', 'ConvertFrom-EeaJsonElement', 'ConvertFrom-EeaJson', 'ConvertTo-EeaUpdateInfo', 'Get-EeaUpdate', 'New-EeaWebsiteClient', 'Get-EeaWebsiteResponse')) {
+            'function ' + $functionName + " {`n" + (Get-Command $functionName -CommandType Function).Definition + "`n}"
+        }
+        $bootstrap = '$ErrorActionPreference = ''Stop''' + "`n" + ($definitions -join "`n") + "`nGet-EeaUpdate -CancellationToken `$args[0] -Client `$args[1]"
+        [void]$pipeline.AddScript($bootstrap).AddArgument($cancellation.Token).AddArgument($Client)
+        $pending = $pipeline.BeginInvoke()
+        return [pscustomobject]@{ PowerShell = $pipeline; AsyncResult = $pending; Cancellation = $cancellation }
+    }
+    catch { $pipeline.Dispose(); $cancellation.Dispose(); throw }
+}
+
+function Test-EeaUpdateCheckDue {
+    [CmdletBinding()]
+    param($Context = (Get-EeaContext), [DateTime]$UtcNow = [DateTime]::UtcNow)
+
+    $stampPath = Join-Path $Context.Root 'last-update-check.txt'
+    Assert-EeaSafePath $stampPath
+    if (-not [IO.File]::Exists($stampPath) -or (Get-Item -LiteralPath $stampPath -Force).Length -gt 128) { return $true }
+    $stamp = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact([IO.File]::ReadAllText($stampPath), 'O', [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind, [ref]$stamp) -or $stamp.Kind -ne [DateTimeKind]::Utc) { return $true }
+    $age = $UtcNow.ToUniversalTime() - $stamp
+    return $age.TotalHours -ge 24 -or $age.TotalSeconds -lt 0
+}
+
+function Set-EeaUpdateCheckTime {
+    [CmdletBinding()]
+    param($Context = (Get-EeaContext), [DateTime]$UtcNow = [DateTime]::UtcNow)
+
+    Invoke-EeaLocked {
+        $stampPath = Join-Path $Context.Root 'last-update-check.txt'
+        Assert-EeaSafePath $stampPath
+        [void][IO.Directory]::CreateDirectory($Context.Root)
+        $stagedPath = Join-Path $Context.Root ('update-check.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            [IO.File]::WriteAllText($stagedPath, $UtcNow.ToUniversalTime().ToString('O'), (New-Object Text.UTF8Encoding($false)))
+            Write-EeaAtomicFile -Source $stagedPath -Destination $stampPath
+        }
+        finally { if ([IO.File]::Exists($stagedPath)) { [IO.File]::Delete($stagedPath) } }
+    }
+}
+
 function Write-EeaAtomicFile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Destination)
@@ -1508,6 +1757,7 @@ function Install-EeaApp {
         [byte[]]$IconData,
         [switch]$GenerateIcon,
         [AllowEmptyString()][string]$Notes,
+        [AllowEmptyString()][string]$EdgeProfile,
         [bool]$Desktop = $true,
         [bool]$StartMenu = $true,
         $Context = (Get-EeaContext)
@@ -1516,7 +1766,9 @@ function Install-EeaApp {
     $cleanName = ConvertTo-EeaName $AppName
     $cleanWebsite = ConvertTo-EeaWebsite $Website
     $notesProvided = $PSBoundParameters.ContainsKey('Notes')
+    $profileProvided = $PSBoundParameters.ContainsKey('EdgeProfile')
     if ($notesProvided) { $Notes = ConvertTo-EeaNotes $Notes }
+    if ($profileProvided) { $EdgeProfile = ConvertTo-EeaProfileDirectory $EdgeProfile }
     if (@(@([bool]$CustomIcon, ($null -ne $IconData), [bool]$GenerateIcon) | Where-Object { $_ }).Count -gt 1) { throw 'Choose one icon source.' }
     if (-not $Desktop -and -not $StartMenu) { throw 'Choose Desktop, Start menu, or both.' }
     $edgePath = Find-EeaEdge
@@ -1530,6 +1782,7 @@ function Install-EeaApp {
         $previousState = Read-EeaManifest $Context $cleanName
         Assert-EeaOwnership -Paths $paths -State $previousState -Desktop $Desktop -StartMenu $StartMenu
         $savedNotes = if ($notesProvided) { $Notes } elseif ($null -ne $previousState -and $null -ne $previousState.PSObject.Properties['Notes']) { $previousState.Notes } else { '' }
+        $savedProfile = if ($profileProvided) { $EdgeProfile } elseif ($null -ne $previousState) { Get-EeaStateProfile $previousState } else { (Get-EeaSettings -Context $Context).DefaultEdgeProfile }
         Invoke-EeaTransaction -Context $Context -Prepare {
             param($StagePath)
             $stagedIcon = Join-Path $StagePath 'icon.ico'
@@ -1553,12 +1806,13 @@ function Install-EeaApp {
                 IconKind = $iconKind
                 Notes = $savedNotes
             }
+            if ($savedProfile) { $newState | Add-Member -NotePropertyName EdgeProfile -NotePropertyValue $savedProfile }
             [pscustomobject]@{ Path = $paths.Icon; Source = $stagedIcon }
             foreach ($slot in @('Desktop', 'StartMenu')) {
                 $selected = if ($slot -eq 'Desktop') { $Desktop } else { $StartMenu }
                 if ($selected) {
                     $stagedShortcut = Join-Path $StagePath ($slot + '.lnk')
-                    Write-EeaShortcut -Path $stagedShortcut -Target $edgePath -Arguments (Get-EeaArguments $cleanWebsite) -Description ('EasyEdgeApps:' + $paths.Id) -Icon ($paths.Icon + ',0')
+                    Write-EeaShortcut -Path $stagedShortcut -Target $edgePath -Arguments (Get-EeaArguments $cleanWebsite -EdgeProfile $savedProfile) -Description ('EasyEdgeApps:' + $paths.Id) -Icon ($paths.Icon + ',0')
                     [pscustomobject]@{ Path = $paths.$slot; Source = $stagedShortcut }
                 }
                 elseif ($null -ne $previousState -and $previousState.$slot) {
@@ -1611,7 +1865,7 @@ function Start-EeaApp {
     if ($null -eq $state) { throw 'This website has not been added yet.' }
     $edgePath = Find-EeaEdge
     if ($PSCmdlet.ShouldProcess($state.Name, 'Open website in Microsoft Edge')) {
-        Start-Process -FilePath $edgePath -ArgumentList (Get-EeaArguments $state.Url) -ErrorAction Stop
+        Start-Process -FilePath $edgePath -ArgumentList (Get-EeaArguments $state.Url -EdgeProfile (Get-EeaStateProfile $state)) -ErrorAction Stop
     }
 }
 
@@ -2962,7 +3216,7 @@ function New-EeaSymbolImage {
         Export = 0xE898; Import = 0xE896; Favorites = 0xE734; Check = 0xE73E; Repair = 0xE90F
         Refresh = 0xE72C; Close = 0xE711; Image = 0xEB9F; Name = 0xE8AC; Link = 0xE71B
         Notes = 0xE70B; Privacy = 0xEA18; Lock = 0xE72E; Unlock = 0xE785; Info = 0xE946
-        Desktop = 0xE7F4; Start = 0xE8FC; SelectAll = 0xE8B3; Motion = 0xE768
+        Desktop = 0xE7F4; Start = 0xE8FC; SelectAll = 0xE8B3; Motion = 0xE768; Settings = 0xE713
     }
     if (-not $symbols.ContainsKey($Icon)) { throw 'An interface icon is not recognized.' }
     $font = $null
@@ -3276,8 +3530,8 @@ function Reset-EeaEditor {
     $ui.NameInput.Clear()
     $ui.UrlInput.Clear()
     $ui.NotesInput.Clear()
-    $ui.DesktopCheck.Checked = $true
-    $ui.StartMenuCheck.Checked = $true
+    $ui.DesktopCheck.Checked = $ui.Settings.DefaultDesktop
+    $ui.StartMenuCheck.Checked = $ui.Settings.DefaultStartMenu
     $ui.CustomIcon = $null
     $ui.WebsiteIconData = $null
     $ui.WebsiteIconUrl = $null
@@ -3314,6 +3568,9 @@ function Show-EeaFormError {
     param([Parameter(Mandatory = $true)]$Form, [Parameter(Mandatory = $true)]$Failure)
 
     $Form.Tag.StatusLabel.Text = $Failure.Exception.Message
+    if ($null -ne $Form.Tag.PSObject.Properties['Context']) {
+        Write-EeaDebugLog -Event Error -Outcome Failed -ErrorType $Failure.Exception.GetBaseException().GetType().Name -Context $Form.Tag.Context
+    }
     [void][Windows.Forms.MessageBox]::Show($Form, $Failure.Exception.Message, 'Could not finish', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Warning)
 }
 
@@ -3323,6 +3580,125 @@ function Confirm-EeaChange {
 
     $answer = [Windows.Forms.MessageBox]::Show($Form, $Message, $Title, [Windows.Forms.MessageBoxButtons]::YesNo, [Windows.Forms.MessageBoxIcon]::Question, [Windows.Forms.MessageBoxDefaultButton]::Button2)
     return $answer -eq [Windows.Forms.DialogResult]::Yes
+}
+
+function Update-EeaUpdateControls {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $ui = $Form.Tag
+    $busy = $null -ne $ui.UpdateRequest
+    $available = $null -ne $ui.UpdateInfo -and $ui.UpdateInfo.UpdateAvailable
+    $ui.CheckUpdatesItem.Enabled = -not $busy
+    $ui.CancelUpdateItem.Visible = $busy
+    $ui.DownloadUpdateItem.Visible = $available
+    if ($available) { $ui.DownloadUpdateItem.Text = 'Download version ' + $ui.UpdateInfo.LatestVersion + '...' }
+    $dialog = $ui.SettingsDialog
+    if ($null -ne $dialog -and -not $dialog.IsDisposed) {
+        $dialog.Tag.CheckUpdatesButton.Enabled = -not $busy
+        $dialog.Tag.CancelUpdateButton.Enabled = $busy
+        $dialog.Tag.DownloadUpdateButton.Visible = $available
+        $dialog.Tag.UpdateSpinner.IsBusy = $busy
+        $dialog.Tag.UpdateLabel.Text = $ui.UpdateStatus
+    }
+}
+
+function Start-EeaFormUpdateCheck {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form, [switch]$Automatic)
+
+    $ui = $Form.Tag
+    if ($null -ne $ui.UpdateRequest) { return }
+    try {
+        if ($Automatic -and (-not $ui.Settings.AutomaticUpdateChecks -or -not (Test-EeaUpdateCheckDue -Context $ui.Context))) { return }
+        $ui.UpdateRequest = Start-EeaUpdateRequest
+        $ui.UpdateStatus = 'Checking for updates...'
+        try { Set-EeaUpdateCheckTime -Context $ui.Context } catch { }
+        Write-EeaDebugLog -Event UpdateCheck -Outcome Started -Settings $ui.Settings -Context $ui.Context
+        $ui.UpdateTimer.Start()
+        Update-EeaUpdateControls $Form
+    }
+    catch {
+        $ui.UpdateStatus = 'Could not start the update check.'
+        Write-EeaDebugLog -Event UpdateCheck -Outcome Failed -ErrorType $_.Exception.GetBaseException().GetType().Name -Settings $ui.Settings -Context $ui.Context
+        Update-EeaUpdateControls $Form
+        if (-not $Automatic) { Show-EeaFormError $Form $_ }
+    }
+}
+
+function Complete-EeaFormUpdateCheck {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $ui = $Form.Tag
+    $request = $ui.UpdateRequest
+    if ($null -eq $request -or -not $request.AsyncResult.IsCompleted) { return }
+    $outcome = 'Failed'
+    $errorType = ''
+    try {
+        $results = @($request.PowerShell.EndInvoke($request.AsyncResult))
+        if ($request.Cancellation.IsCancellationRequested) { $outcome = 'Cancelled'; $ui.UpdateStatus = 'Update check cancelled.' }
+        else {
+            if ($results.Count -ne 1) { throw 'The update check returned no release information.' }
+            $ui.UpdateInfo = $results[0]
+            $ui.UpdateStatus = if ($ui.UpdateInfo.UpdateAvailable) { 'Version ' + $ui.UpdateInfo.LatestVersion + ' is available.' } else { 'You have the latest version.' }
+            $outcome = 'Succeeded'
+        }
+    }
+    catch {
+        $errorType = $_.Exception.GetBaseException().GetType().Name
+        if ($request.Cancellation.IsCancellationRequested) { $outcome = 'Cancelled'; $ui.UpdateStatus = 'Update check cancelled.' }
+        else { $ui.UpdateStatus = 'Could not check for updates. Check your connection and try again later.' }
+    }
+    finally {
+        $request.PowerShell.Dispose()
+        $request.Cancellation.Dispose()
+        $ui.UpdateRequest = $null
+        $ui.UpdateTimer.Stop()
+        Update-EeaUpdateControls $Form
+        Write-EeaDebugLog -Event UpdateCheck -Outcome $outcome -ErrorType $errorType -Settings $ui.Settings -Context $ui.Context
+    }
+    if ($null -eq $ui.IconRequest) { $ui.StatusLabel.Text = $ui.UpdateStatus }
+    if ($ui.CloseAfterUpdateCheck) { $Form.Close() }
+}
+
+function Open-EeaUpdateRelease {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form)
+
+    $info = $Form.Tag.UpdateInfo
+    if ($null -eq $info -or -not $info.UpdateAvailable) { return }
+    $release = [pscustomobject]@{ tag_name = ('v' + $info.LatestVersion); html_url = $info.ReleaseUrl; draft = $false; prerelease = $false }
+    $validated = ConvertTo-EeaUpdateInfo $release
+    Start-Process -FilePath $validated.ReleaseUrl -ErrorAction Stop
+}
+
+function Set-EeaFormPreferences {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Form, [Parameter(Mandatory = $true)]$Settings)
+
+    $ui = $Form.Tag
+    Stop-EeaWebsiteIconLookup $Form
+    $ui.Settings = ConvertTo-EeaSettings $Settings
+    $ui.SettingsError = ''
+    $ui.UpdatingSettings = $true
+    try {
+        $Form.MotionEnabled = $ui.Settings.MotionEnabled
+        $ui.MotionCheck.Checked = $Form.MotionEnabled -and $Form.MotionAvailable
+        if ($Form.Font.Size -ne $ui.Settings.TextSize) {
+            $Form.Font = New-Object Drawing.Font('Segoe UI', $ui.Settings.TextSize)
+            $Form.PerformAutoScale()
+        }
+        $ui.SettingsMenu.Font = $Form.Font
+        if ($ui.AppList.SelectedIndex -lt 0) {
+            $ui.DesktopCheck.Checked = $ui.Settings.DefaultDesktop
+            $ui.StartMenuCheck.Checked = $ui.Settings.DefaultStartMenu
+        }
+    }
+    finally { $ui.UpdatingSettings = $false }
+    if (-not $ui.Settings.AutomaticUpdateChecks -and $null -ne $ui.UpdateRequest) { $ui.UpdateRequest.Cancellation.Cancel() }
+    $Form.PerformLayout()
+    Start-EeaFormUpdateCheck -Form $Form -Automatic
 }
 
 function New-EeaSetupForm {
@@ -3335,10 +3711,14 @@ function New-EeaSetupForm {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
     [Windows.Forms.Application]::EnableVisualStyles()
+    $settingsError = ''
+    try { $settings = Get-EeaSettings -Context $Context }
+    catch { $settings = New-EeaSettings; $settingsError = 'Application preferences could not be loaded. Save Settings to replace the damaged preferences.' }
     $uiNamespace = Initialize-EeaSpaceBackground
     $form = New-Object ($uiNamespace + '.StarfieldForm')
     $form.Text = 'Easy Edge Apps'
-    $form.Font = New-Object Drawing.Font('Segoe UI', 12)
+    $form.Font = New-Object Drawing.Font('Segoe UI', $settings.TextSize)
+    $form.MotionEnabled = $settings.MotionEnabled
     $form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Font
     $form.ClientSize = New-Object Drawing.Size(1000, 700)
     $form.MinimumSize = New-Object Drawing.Size(800, 640)
@@ -3364,10 +3744,11 @@ function New-EeaSetupForm {
     $headingLayout.AutoSize = $true
     $headingLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $headingLayout.Margin = New-Object Windows.Forms.Padding(0)
-    $headingLayout.ColumnCount = 3
+    $headingLayout.ColumnCount = 4
     $headingLayout.RowCount = 1
     [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Absolute, 48)))
     [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, 100)))
+    [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::AutoSize)))
     [void]$headingLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::AutoSize)))
     [void]$headingLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::AutoSize)))
     $brandPicture = New-Object Windows.Forms.PictureBox
@@ -3393,8 +3774,37 @@ function New-EeaSetupForm {
     $motionCheck.Margin = New-Object Windows.Forms.Padding(12, 0, 0, 16)
     $motionCheck.Enabled = $form.MotionAvailable
     $motionCheck.Checked = $form.MotionEnabled -and $form.MotionAvailable
-    $motionCheck.Add_CheckedChanged({ param($Sender, $EventArgs) if ($Sender.Enabled) { $Sender.FindForm().MotionEnabled = $Sender.Checked } })
+    $motionCheck.Add_CheckedChanged({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.FindForm()
+        if (-not $Sender.Enabled -or $null -eq $ownerForm -or $null -eq $ownerForm.Tag -or $ownerForm.Tag.UpdatingSettings) { return }
+        $ownerForm.MotionEnabled = $Sender.Checked
+        $ownerForm.Tag.Settings.MotionEnabled = $Sender.Checked
+        try { $null = Save-EeaSettings -Settings $ownerForm.Tag.Settings -Context $ownerForm.Tag.Context -Confirm:$false }
+        catch { Show-EeaFormError $ownerForm $_ }
+    })
     $headingLayout.Controls.Add($motionCheck, 2, 0)
+    $settingsButton = New-EeaButton '' -Icon Settings -AccessibleName 'Settings and updates'
+    $settingsButton.AutoSize = $false
+    $settingsButton.Padding = New-Object Windows.Forms.Padding(0)
+    $settingsButton.MinimumSize = New-Object Drawing.Size(32, 32)
+    $settingsButton.Size = New-Object Drawing.Size(32, 32)
+    $settingsButton.ImageAlign = [Drawing.ContentAlignment]::MiddleCenter
+    $settingsButton.Anchor = [Windows.Forms.AnchorStyles]::Right
+    $settingsButton.Margin = New-Object Windows.Forms.Padding(12, 0, 0, 16)
+    $settingsMenu = New-Object Windows.Forms.ContextMenuStrip
+    $settingsMenu.Font = $form.Font
+    $settingsMenu.Tag = $form
+    $preferencesItem = New-Object Windows.Forms.ToolStripMenuItem('Preferences...')
+    $checkUpdatesItem = New-Object Windows.Forms.ToolStripMenuItem('Check for updates...')
+    $cancelUpdateItem = New-Object Windows.Forms.ToolStripMenuItem('Cancel update check')
+    $cancelUpdateItem.Visible = $false
+    $downloadUpdateItem = New-Object Windows.Forms.ToolStripMenuItem('Download update...')
+    $downloadUpdateItem.Visible = $false
+    $settingsMenu.Items.AddRange([Windows.Forms.ToolStripItem[]]@($preferencesItem, $checkUpdatesItem, $cancelUpdateItem, $downloadUpdateItem))
+    $settingsButton.ContextMenuStrip = $settingsMenu
+    $settingsButton.Add_Click({ param($Sender, $EventArgs) $Sender.ContextMenuStrip.Show($Sender, (New-Object Drawing.Point(0, $Sender.Height))) })
+    $headingLayout.Controls.Add($settingsButton, 3, 0)
     $layout.Controls.Add($headingLayout, 0, 0)
 
     $content = New-Object ($uiNamespace + '.SpaceTableLayoutPanel')
@@ -3576,6 +3986,17 @@ function New-EeaSetupForm {
         $ownerForm.Tag.ActivitySpinner.Advance()
         Complete-EeaWebsiteIconLookup $ownerForm
     })
+    $updateTimer = New-Object Windows.Forms.Timer
+    $updateTimer.Interval = 100
+    $updateTimer.Tag = $form
+    $updateTimer.Add_Tick({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.Tag
+        if ($null -eq $ownerForm -or $ownerForm.IsDisposed) { return }
+        $dialog = $ownerForm.Tag.SettingsDialog
+        if ($null -ne $dialog -and -not $dialog.IsDisposed) { $dialog.Tag.UpdateSpinner.Advance() }
+        Complete-EeaFormUpdateCheck $ownerForm
+    })
     $form.Tag = [pscustomobject]@{
         Context = $Context; AppList = $appList; NameInput = $nameInput; UrlInput = $urlInput; NotesInput = $notesInput
         DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck; CustomIcon = $null
@@ -3588,15 +4009,46 @@ function New-EeaSetupForm {
         NewButton = $newButton; CloseButton = $closeButton
         EditorViewport = $editorViewport; BrandPicture = $brandPicture; MotionCheck = $motionCheck
         ExportButton = $exportButton; ImportButton = $importButton; FavoritesButton = $favoritesButton; CheckButton = $checkButton
-        EdgeUserDataPath = $EdgeUserDataPath
+        EdgeUserDataPath = $EdgeUserDataPath; Settings = $settings; SettingsError = $settingsError; UpdatingSettings = $false
+        SettingsButton = $settingsButton; SettingsMenu = $settingsMenu; SettingsDialog = $null
+        CheckUpdatesItem = $checkUpdatesItem; CancelUpdateItem = $cancelUpdateItem; DownloadUpdateItem = $downloadUpdateItem
+        UpdateRequest = $null; UpdateTimer = $updateTimer; UpdateInfo = $null; CloseAfterUpdateCheck = $false
+        UpdateStatus = 'Not checked yet.'
     }
     $form.Add_MotionStateChanged({
         param($Sender, $EventArgs)
         $check = $Sender.Tag.MotionCheck
-        $check.Enabled = $Sender.MotionAvailable
-        $check.Checked = $Sender.MotionEnabled -and $Sender.MotionAvailable
+        $previousUpdating = $Sender.Tag.UpdatingSettings
+        $Sender.Tag.UpdatingSettings = $true
+        try {
+            $check.Enabled = $Sender.MotionAvailable
+            $check.Checked = $Sender.MotionEnabled -and $Sender.MotionAvailable
+        }
+        finally { $Sender.Tag.UpdatingSettings = $previousUpdating }
     })
     Enable-EeaSpaceTheme $form
+    $preferencesItem.Add_Click({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.Owner.Tag
+        $dialog = $null
+        try { $dialog = New-EeaSettingsForm -OwnerForm $ownerForm; [void](Show-EeaModal -Owner $ownerForm -Dialog $dialog) }
+        catch { Show-EeaFormError $ownerForm $_ }
+        finally { if ($null -ne $dialog) { $dialog.Dispose() } }
+    })
+    $checkUpdatesItem.Add_Click({ param($Sender, $EventArgs) Start-EeaFormUpdateCheck $Sender.Owner.Tag })
+    $cancelUpdateItem.Add_Click({ param($Sender, $EventArgs) if ($null -ne $Sender.Owner.Tag.Tag.UpdateRequest) { $Sender.Owner.Tag.Tag.UpdateRequest.Cancellation.Cancel() } })
+    $downloadUpdateItem.Add_Click({
+        param($Sender, $EventArgs)
+        try { Open-EeaUpdateRelease $Sender.Owner.Tag }
+        catch { Show-EeaFormError $Sender.Owner.Tag $_ }
+    })
+    $form.Add_Shown({
+        param($Sender, $EventArgs)
+        if ($Sender.Tag.SettingsError) { $Sender.Tag.StatusLabel.Text = $Sender.Tag.SettingsError }
+        Write-EeaDebugLog -Event SetupOpened -Settings $Sender.Tag.Settings -Context $Sender.Tag.Context
+        try { Start-EeaFormUpdateCheck -Form $Sender -Automatic }
+        catch { Write-EeaDebugLog -Event UpdateCheck -Outcome Failed -ErrorType $_.Exception.GetType().Name -Settings $Sender.Tag.Settings -Context $Sender.Tag.Context }
+    })
 
     $appList.Add_SelectedIndexChanged({
         param($Sender, $EventArgs)
@@ -3695,6 +4147,7 @@ function New-EeaSetupForm {
             $installed = Install-EeaApp -AppName $cleanName -Website $website -Notes $ui.NotesInput.Text -CustomIcon $ui.CustomIcon -IconData $ui.WebsiteIconData -Desktop $ui.DesktopCheck.Checked -StartMenu $ui.StartMenuCheck.Checked -Context $ui.Context -Confirm:$false
             Update-EeaForm -Form $ownerForm -SelectName $installed.Name
             $ui.StatusLabel.Text = 'Saved: ' + $installed.Name
+            Write-EeaDebugLog -Event AppSaved -Settings $ui.Settings -Context $ui.Context
         }
         catch { Show-EeaFormError $ownerForm $_ }
         finally { $ownerForm.UseWaitCursor = $false; $ui.SaveButton.Enabled = $null -eq $ui.IconRequest }
@@ -3702,7 +4155,10 @@ function New-EeaSetupForm {
     $openButton.Add_Click({
         param($Sender, $EventArgs)
         $ownerForm = $Sender.FindForm()
-        try { Start-EeaApp -AppName $ownerForm.Tag.NameInput.Text -Context $ownerForm.Tag.Context -Confirm:$false }
+        try {
+            Start-EeaApp -AppName $ownerForm.Tag.NameInput.Text -Context $ownerForm.Tag.Context -Confirm:$false
+            Write-EeaDebugLog -Event AppOpened -Settings $ownerForm.Tag.Settings -Context $ownerForm.Tag.Context
+        }
         catch { Show-EeaFormError $ownerForm $_ }
     })
     $removeButton.Add_Click({
@@ -3715,11 +4171,18 @@ function New-EeaSetupForm {
             Remove-EeaApp -AppName $removedName -Context $ui.Context -Confirm:$false
             Update-EeaForm $ownerForm
             $ui.StatusLabel.Text = 'Removed shortcuts: ' + $removedName
+            Write-EeaDebugLog -Event AppRemoved -Settings $ui.Settings -Context $ui.Context
         }
         catch { Show-EeaFormError $ownerForm $_ }
     })
     $form.Add_FormClosing({
         param($Sender, $EventArgs)
+        if ($null -ne $Sender.Tag.UpdateRequest) {
+            $Sender.Tag.CloseAfterUpdateCheck = $true
+            $Sender.Tag.UpdateRequest.Cancellation.Cancel()
+            $EventArgs.Cancel = $true
+            $Sender.DialogResult = [Windows.Forms.DialogResult]::None
+        }
         if ($null -ne $Sender.Tag.IconRequest) {
             $Sender.Tag.CloseAfterIconLookup = $true
             Stop-EeaWebsiteIconLookup $Sender
@@ -3729,6 +4192,16 @@ function New-EeaSetupForm {
     })
     $form.Add_Disposed({
         param($Sender, $EventArgs)
+        $Sender.Tag.UpdateTimer.Stop()
+        $Sender.Tag.UpdateTimer.Dispose()
+        $Sender.Tag.UpdateTimer.Tag = $null
+        $updateRequest = $Sender.Tag.UpdateRequest
+        if ($null -ne $updateRequest) {
+            $updateRequest.Cancellation.Cancel()
+            try { $updateRequest.PowerShell.Stop() }
+            finally { $updateRequest.PowerShell.Dispose(); $updateRequest.Cancellation.Dispose(); $Sender.Tag.UpdateRequest = $null }
+        }
+        $Sender.Tag.SettingsMenu.Dispose()
         $Sender.Tag.IconTimer.Stop()
         $Sender.Tag.IconTimer.Dispose()
         $Sender.Tag.IconTimer.Tag = $null
@@ -3795,6 +4268,11 @@ function Show-EeaModal {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Owner, [Parameter(Mandatory = $true)]$Dialog)
 
+    if (-not $Dialog.Font.Equals($Owner.Font)) {
+        $Dialog.Font = $Owner.Font
+        $Dialog.PerformAutoScale()
+    }
+    $Dialog.MaximumSize = [Windows.Forms.Screen]::FromControl($Owner).WorkingArea.Size
     return $Dialog.ShowDialog($Owner)
 }
 
@@ -3895,6 +4373,143 @@ function Add-EeaDialogField {
     $editor.Controls.Add($caption, 0, $editor.RowCount)
     $editor.Controls.Add($Control, 0, $editor.RowCount + 1)
     $editor.RowCount += 2
+}
+
+function New-EeaSettingsForm {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$OwnerForm)
+
+    $settings = ConvertTo-EeaSettings $OwnerForm.Tag.Settings
+    $form = New-EeaScrollDialog -Title 'Settings' -ActionText '&Save settings' -ActionIcon Save
+    $form.Tag | Add-Member -NotePropertyName Context -NotePropertyValue $OwnerForm.Tag.Context
+    $form.Tag | Add-Member -NotePropertyName SetupForm -NotePropertyValue $OwnerForm
+    $autoCheck = New-EeaCheckBox 'Check automatically once a day' -Icon Refresh
+    $autoCheck.Checked = $settings.AutomaticUpdateChecks
+    Add-EeaDialogField $form 'Updates' $autoCheck -Icon Refresh
+    $updatePanel = New-Object Windows.Forms.FlowLayoutPanel
+    $updatePanel.AutoSize = $true
+    $updateSpinner = New-Object ((Initialize-EeaSpaceBackground) + '.LoadingSpinner')
+    $updateSpinner.Margin = New-Object Windows.Forms.Padding(0, 8, 8, 0)
+    $checkUpdates = New-EeaButton '&Check for updates' -Icon Refresh
+    $cancelUpdate = New-EeaButton '' -Icon Close -AccessibleName 'Cancel update check'
+    $cancelUpdate.AutoSize = $false
+    $cancelUpdate.Padding = New-Object Windows.Forms.Padding(0)
+    $cancelUpdate.MinimumSize = New-Object Drawing.Size(32, 32)
+    $cancelUpdate.Size = New-Object Drawing.Size(32, 32)
+    $cancelUpdate.ImageAlign = [Drawing.ContentAlignment]::MiddleCenter
+    $downloadUpdate = New-EeaButton '&Download update' -Icon Import
+    $updatePanel.Controls.AddRange([Windows.Forms.Control[]]@($updateSpinner, $checkUpdates, $cancelUpdate, $downloadUpdate))
+    Add-EeaDialogField $form ('Version ' + (Get-EeaVersion).ToString()) $updatePanel -Icon Info
+    $updateLabel = New-EeaLabel -Icon Info
+    $updateLabel.AutoSize = $true
+    Add-EeaDialogField $form 'Update status' $updateLabel -Icon Info
+    $profileInput = New-Object Windows.Forms.ComboBox
+    $profileInput.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $profileInput.DisplayMember = 'DisplayName'
+    [void]$profileInput.Items.Add([pscustomobject]@{ DisplayName = 'Let Edge choose'; DirectoryName = ''; Available = $true })
+    try {
+        foreach ($profile in @(Get-EeaEdgeProfiles -UserDataPath $OwnerForm.Tag.EdgeUserDataPath -ForLaunchProfiles)) {
+            [void]$profileInput.Items.Add([pscustomobject]@{ DisplayName = $profile.DisplayName; DirectoryName = $profile.DirectoryName; Available = $true })
+        }
+    }
+    catch { }
+    $profileInput.SelectedIndex = 0
+    for ($profileIndex = 0; $profileIndex -lt $profileInput.Items.Count; $profileIndex++) {
+        if ($profileInput.Items[$profileIndex].DirectoryName -ceq $settings.DefaultEdgeProfile) { $profileInput.SelectedIndex = $profileIndex }
+    }
+    if ($settings.DefaultEdgeProfile -and $profileInput.SelectedIndex -eq 0) {
+        $profileInput.SelectedIndex = $profileInput.Items.Add([pscustomobject]@{ DisplayName = ('Unavailable: ' + $settings.DefaultEdgeProfile); DirectoryName = $settings.DefaultEdgeProfile; Available = $false })
+    }
+    Add-EeaDialogField $form 'Edge profile for &new websites' $profileInput -Icon Apps
+    $desktopCheck = New-EeaCheckBox '&Desktop shortcuts' -Icon Desktop
+    $desktopCheck.Checked = $settings.DefaultDesktop
+    Add-EeaDialogField $form 'Default placement' $desktopCheck -Icon Desktop
+    $startMenuCheck = New-EeaCheckBox '&Start menu shortcuts' -Icon Start
+    $startMenuCheck.Checked = $settings.DefaultStartMenu
+    Add-EeaDialogField $form 'Start menu' $startMenuCheck -Icon Start
+    $motionCheck = New-EeaCheckBox '&Animate the space background' -Icon Motion
+    $motionCheck.Checked = $settings.MotionEnabled
+    Add-EeaDialogField $form 'Appearance' $motionCheck -Icon Motion
+    $textSize = New-Object Windows.Forms.ComboBox
+    $textSize.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    foreach ($pointSize in @(12, 14, 16, 18)) { [void]$textSize.Items.Add($pointSize) }
+    $textSize.SelectedItem = $settings.TextSize
+    Add-EeaDialogField $form '&Text size' $textSize -Icon Name
+    $debugCheck = New-EeaCheckBox 'Enable &debug logging' -Icon Notes
+    $debugCheck.Checked = $settings.DebugLogging
+    Add-EeaDialogField $form 'Diagnostics' $debugCheck -Icon Notes
+    $logPanel = New-Object Windows.Forms.FlowLayoutPanel
+    $logPanel.AutoSize = $true
+    $openLogs = New-EeaButton '&Open log folder' -Icon Open
+    $clearLogs = New-EeaButton 'C&lear logs' -Icon Remove
+    $logPanel.Controls.AddRange([Windows.Forms.Control[]]@($openLogs, $clearLogs))
+    Add-EeaDialogField $form 'Diagnostic files' $logPanel -Icon Privacy
+    foreach ($entry in @{
+        AutoUpdateCheck = $autoCheck; ProfileInput = $profileInput; DesktopCheck = $desktopCheck; StartMenuCheck = $startMenuCheck
+        MotionCheck = $motionCheck; TextSizeInput = $textSize; DebugCheck = $debugCheck
+        CheckUpdatesButton = $checkUpdates; CancelUpdateButton = $cancelUpdate; DownloadUpdateButton = $downloadUpdate
+        UpdateSpinner = $updateSpinner; UpdateLabel = $updateLabel; OpenLogsButton = $openLogs; ClearLogsButton = $clearLogs
+    }.GetEnumerator()) { $form.Tag | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value }
+    $OwnerForm.Tag.SettingsDialog = $form
+    Update-EeaUpdateControls $OwnerForm
+    $checkUpdates.Add_Click({ param($Sender, $EventArgs) Start-EeaFormUpdateCheck $Sender.FindForm().Tag.SetupForm })
+    $cancelUpdate.Add_Click({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.FindForm().Tag.SetupForm
+        if ($null -ne $ownerForm.Tag.UpdateRequest) { $ownerForm.Tag.UpdateRequest.Cancellation.Cancel() }
+    })
+    $downloadUpdate.Add_Click({
+        param($Sender, $EventArgs)
+        $dialog = $Sender.FindForm()
+        try { Open-EeaUpdateRelease $dialog.Tag.SetupForm }
+        catch { Show-EeaFormError $dialog $_ }
+    })
+    $openLogs.Add_Click({
+        param($Sender, $EventArgs)
+        $dialog = $Sender.FindForm()
+        try {
+            $logDirectory = Join-Path $dialog.Tag.Context.Root 'Logs'
+            Assert-EeaSafePath $logDirectory
+            if (-not [IO.Directory]::Exists($logDirectory)) { $dialog.Tag.StatusLabel.Text = 'No diagnostic logs yet.'; return }
+            Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList ('"{0}"' -f $logDirectory) -ErrorAction Stop
+        }
+        catch { Show-EeaFormError $dialog $_ }
+    })
+    $clearLogs.Add_Click({
+        param($Sender, $EventArgs)
+        $dialog = $Sender.FindForm()
+        if (-not (Confirm-EeaChange $dialog 'Delete the Easy Edge Apps diagnostic logs?' 'Clear diagnostic logs?')) { return }
+        try { Clear-EeaDebugLogs -Context $dialog.Tag.Context -Confirm:$false; $dialog.Tag.StatusLabel.Text = 'Diagnostic logs cleared.' }
+        catch { Show-EeaFormError $dialog $_ }
+    })
+    $form.Tag.ApplyButton.Add_Click({
+        param($Sender, $EventArgs)
+        $dialog = $Sender.FindForm()
+        $ui = $dialog.Tag
+        try {
+            if ($null -eq $ui.ProfileInput.SelectedItem -or -not $ui.ProfileInput.SelectedItem.Available) { throw 'Choose an available Edge profile or let Edge choose.' }
+            $updated = New-EeaSettings
+            $updated.AutomaticUpdateChecks = $ui.AutoUpdateCheck.Checked
+            $updated.DebugLogging = $ui.DebugCheck.Checked
+            $updated.DefaultEdgeProfile = $ui.ProfileInput.SelectedItem.DirectoryName
+            $updated.DefaultDesktop = $ui.DesktopCheck.Checked
+            $updated.DefaultStartMenu = $ui.StartMenuCheck.Checked
+            $updated.MotionEnabled = $ui.MotionCheck.Checked
+            $updated.TextSize = [int]$ui.TextSizeInput.SelectedItem
+            $saved = Save-EeaSettings -Settings $updated -Context $ui.Context -Confirm:$false
+            Set-EeaFormPreferences -Form $ui.SetupForm -Settings $saved
+            Write-EeaDebugLog -Event SettingsSaved -Settings $saved -Context $ui.Context
+            $ui.StatusLabel.Text = 'Settings saved.'
+            $dialog.DialogResult = [Windows.Forms.DialogResult]::OK
+        }
+        catch { Show-EeaFormError $dialog $_ }
+    })
+    $form.Add_Disposed({
+        param($Sender, $EventArgs)
+        $ownerForm = $Sender.Tag.SetupForm
+        if (-not $ownerForm.IsDisposed -and $ownerForm.Tag.SettingsDialog -eq $Sender) { $ownerForm.Tag.SettingsDialog = $null }
+    })
+    return $form
 }
 
 function New-EeaPasswordForm {
@@ -4301,7 +4916,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ($env:OS -ne 'Windows_NT') { throw 'Easy Edge Apps needs Windows and Microsoft Edge.' }
         if (-not $PSBoundParameters.ContainsKey('Action') -and $Name -and $Url) { $Action = 'Install' }
         $actionOptions = @{
-            Setup = @('EdgeUserDataPath'); Install = @('Name', 'Url', 'IconPath', 'Notes', 'NoDesktop', 'NoStartMenu', 'Launch')
+            Setup = @('EdgeUserDataPath'); Install = @('Name', 'Url', 'IconPath', 'Notes', 'EdgeProfile', 'NoDesktop', 'NoStartMenu', 'Launch')
             List = @(); Remove = @('Name'); Open = @('Name')
             ExportKit = @('Path', 'KitName', 'Notes', 'AppNames', 'Protected', 'Password', 'PasswordConfirmation', 'Replace')
             ImportKit = @('Path', 'AppNames', 'Password', 'Preview'); Check = @('Name', 'AppNames'); Repair = @('Name', 'AppNames', 'Preview')
@@ -4338,6 +4953,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
                 $installOptions = @{ AppName = $Name; Website = $Url; CustomIcon = $IconPath; Desktop = (-not $NoDesktop); StartMenu = (-not $NoStartMenu) }
                 if ($PSBoundParameters.ContainsKey('Notes')) { $installOptions.Notes = $Notes }
+                if ($PSBoundParameters.ContainsKey('EdgeProfile')) { $installOptions.EdgeProfile = $EdgeProfile }
                 $installedApp = Install-EeaApp @installOptions
                 if ($null -ne $installedApp) {
                     if (-not $Quiet) { Write-Host ('Saved website shortcuts: ' + $installedApp.Name) }

@@ -1,8 +1,8 @@
 # Command-Line Automation
 
-These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.2.0 or later, including `-Unattended` and selected kit imports. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
+These examples apply to [Easy Edge Apps](../EasyEdgeApps.ps1) version 1.3.0. Unattended commands and selected kit imports remain compatible with version 1.2.0; per-app launch-profile overrides require 1.3.0. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
 
-Run as the Windows user whose shortcuts you intend to manage, not as SYSTEM, an administrator, or a different helper account. The application is still one script; no module, service, or scheduled task is installed.
+Run as the Windows user whose shortcuts you intend to manage, not as SYSTEM, an administrator, or a different helper account. The portable application is still one script; the optional MSI installs that same script and a graphical manager launcher. No module, service, or scheduled task is installed. Automate the script directly, not the MSI launcher, which accepts no forwarded options.
 
 For built-in help, run `.\EasyEdgeApps.ps1 --help`, `.\EasyEdgeApps.ps1 -h`, or `.\EasyEdgeApps.ps1 -?`. `-Help` is also supported. Each example explains its scenario and effects; `--help`, `-h`, and `-Help` use compact spacing, while `-?` retains PowerShell's native formatting. Help does not open setup or perform an operation. Use `-h`, `-Help`, or `-?` when combining help with an explicit `-Action`.
 
@@ -44,7 +44,7 @@ Choose proposed names from `ListFavorites`, which may differ from bookmark title
 
 | Action | Selection and options | Unattended result |
 | --- | --- | --- |
-| `Install` | `-Name`, `-Url`; optional `-IconPath`, `-Notes`, `-NoDesktop`, `-NoStartMenu`, `-Launch` | Saved name, URL, and placement |
+| `Install` | `-Name`, `-Url`; optional `-IconPath`, `-Notes`, `-EdgeProfile`, `-NoDesktop`, `-NoStartMenu`, `-Launch` | Saved name, URL, and placement |
 | `List` | All saved apps | Name, URL, and placement per app |
 | `ExportKit` | `-Path`; optional `-AppNames`, `-KitName`, `-Notes`, `-Replace`, password options | Destination, protection flag, app count |
 | `ImportKit` | `-Path`; optional `-AppNames`, `-Password`, `-Preview` | Preview rows or per-app application results |
@@ -57,6 +57,24 @@ Choose proposed names from `ListFavorites`, which may differ from bookmark title
 
 Omitting `-AppNames` exports all saved apps or imports the entire kit. An explicitly empty array, unknown kit name, or invalid name fails instead of silently selecting everything. Names are normalized and case-insensitive. Import always validates the complete source kit before selecting apps, and leaves other installed apps alone. A conflict in the selected batch prevents all preflight writes; a later filesystem failure can leave earlier apps completed.
 
+## Edge profiles
+
+Install accepts an optional launch-profile identifier. This differs from `-EdgeProfile` on Favorites commands, where it only selects the local browser data to read.
+
+```powershell
+.\EasyEdgeApps.ps1 -Action Install -Name 'My Mail' -Url 'https://outlook.live.com/mail/' -EdgeProfile 'Profile 1' -Unattended
+.\EasyEdgeApps.ps1 -Action Open -Name 'My Mail' -Unattended
+
+# Restore Edge-controlled profile selection for this app.
+.\EasyEdgeApps.ps1 -Action Install -Name 'My Mail' -Url 'https://outlook.live.com/mail/' -EdgeProfile '' -Unattended
+```
+
+Only the exact identifiers `Default`, `Profile ` followed by one to six digits, or an empty string are accepted. The CLI validates the identifier, not the profile's physical existence or sign-in state. Use the intended local Stable Edge profile. No arbitrary flags, user-data paths, or browser credentials are accepted as launch arguments.
+
+An explicit value overrides the app's saved choice. Without `-EdgeProfile`, an existing app retains its profile and a new app uses the default from Settings. Repair and Open use the stored profile. App Kits never contain profile identifiers; existing imported apps retain their choice and newly imported apps use the destination user's default. Kit placement remains controlled by the kit. The Settings placement defaults affect the main new-website editor, not CLI `-NoDesktop`/`-NoStartMenu` behavior.
+
+`-EdgeUserDataPath` remains a discovery source for Setup and Favorites commands, not a browser launch destination. Automatic update checking is confined to setup; command-line operations do not contact the update service. The opt-in diagnostic file is not a CLI transcript, so protect any separate automation logs and JSON output.
+
 ## Process invocation
 
 For a task runner or another shell, use a dedicated noninteractive PowerShell process:
@@ -66,6 +84,8 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 
 ```
 
 `pwsh.exe` accepts the same options. The execution-policy flag applies only to that process; it does not override organizational restrictions. For a scheduled job, run under the intended user's account with its profile available. Use a private, accessible destination and check the process exit code. These examples do not create a task or change Windows policy.
+
+For an MSI installation, the script normally resides at `$env:LOCALAPPDATA\Programs\Easy Edge Apps\EasyEdgeApps.ps1`. Use an absolute path and invoke it with the call operator, for example `& "$env:LOCALAPPDATA\Programs\Easy Edge Apps\EasyEdgeApps.ps1" -Action List -Unattended`. MSI maintenance commands and build prerequisites are documented in [Installer](Installer.md).
 
 ## Results and exit codes
 

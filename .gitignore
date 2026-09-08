@@ -8,3 +8,5 @@
 .pending/
 TestResults/
 SHA256SUMS.txt
+artifacts/
+.wix/

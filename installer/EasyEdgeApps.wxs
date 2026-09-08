@@ -1,0 +1,52 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Easy Edge Apps" Manufacturer="blakedrumm" Version="$(var.AppVersion)" Language="1033"
+           Scope="perUser" InstallerVersion="500" UpgradeCode="{9D0AF71A-353C-4A88-A171-16249356093F}">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Easy Edge Apps is already installed." Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="WINDOWSBUILDNUMBER">
+      <RegistrySearch Id="WindowsBuildNumber" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 22000)" Message="Easy Edge Apps requires 64-bit Windows 11 and Windows PowerShell 5.1." />
+    <Icon Id="AppIcon" SourceFile="$(var.BuildRoot)\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/blakedrumm/EasyEdgeApps/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/blakedrumm/EasyEdgeApps" />
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKCU" Key="Software\EasyEdgeApps\Installer" Name="InstallFolder" Type="raw" />
+    </Property>
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalPrograms" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Easy Edge Apps">
+          <Component Id="LauncherComponent" Guid="{D8C0BB4A-B1B8-4416-8B7F-022879D3F733}">
+            <File Id="LauncherFile" Source="$(var.BuildRoot)\EasyEdgeApps.exe" />
+            <RegistryValue Root="HKCU" Key="Software\EasyEdgeApps\Installer" Name="InstallFolder" Value="[INSTALLFOLDER]" Type="string" KeyPath="yes" />
+            <Shortcut Id="SetupShortcut" Directory="ProgramMenuFolder" Name="Easy Edge Apps" Target="[INSTALLFOLDER]EasyEdgeApps.exe" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+            <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+          </Component>
+          <Component Id="ScriptComponent" Guid="{EBD072F4-7F82-481D-8910-46B4EF20A255}">
+            <File Id="ApplicationScript" Source="$(var.SourceRoot)\EasyEdgeApps.ps1" />
+            <RegistryValue Root="HKCU" Key="Software\EasyEdgeApps\Installer" Name="Script" Value="1" Type="integer" KeyPath="yes" />
+          </Component>
+          <Component Id="LicenseComponent" Guid="{D05137E2-F77F-4C86-A686-1FDBF5EC36B3}">
+            <File Id="ApplicationLicense" Source="$(var.SourceRoot)\LICENSE" />
+            <RegistryValue Root="HKCU" Key="Software\EasyEdgeApps\Installer" Name="License" Value="1" Type="integer" KeyPath="yes" />
+          </Component>
+          <Component Id="NoticesComponent" Guid="{CFDE7826-16CC-464C-848C-3826DD0F9712}">
+            <File Id="ApplicationNotices" Source="$(var.BuildRoot)\THIRD-PARTY-NOTICES.md" />
+            <RegistryValue Root="HKCU" Key="Software\EasyEdgeApps\Installer" Name="Notices" Value="1" Type="integer" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <Feature Id="Application" Title="Easy Edge Apps" Level="1">
+      <ComponentRef Id="LauncherComponent" />
+      <ComponentRef Id="ScriptComponent" />
+      <ComponentRef Id="LicenseComponent" />
+      <ComponentRef Id="NoticesComponent" />
+    </Feature>
+    <ui:WixUI Id="WixUI_Minimal" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.BuildRoot)\license.rtf" />
+  </Package>
+</Wix>
