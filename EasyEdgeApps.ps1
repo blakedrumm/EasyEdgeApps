@@ -2234,8 +2234,8 @@ namespace EasyEdgeApps
             for (int index = 0; index < stars.Length; index++)
             {
                 Star star = stars[index];
-                double horizontalDrift = star.Horizontal * horizontalSpan - seconds * (0.4 + star.Depth * 0.8);
-                double verticalDrift = star.Vertical * verticalSpan + seconds * (0.12 + star.Depth * 0.24);
+                double horizontalDrift = star.Horizontal * horizontalSpan - seconds * (1.6 + star.Depth * 3.2);
+                double verticalDrift = star.Vertical * verticalSpan + seconds * (0.48 + star.Depth * 0.96);
                 float horizontal = (float)((horizontalDrift % horizontalSpan + horizontalSpan) % horizontalSpan) - 32;
                 float vertical = (float)((verticalDrift % verticalSpan + verticalSpan) % verticalSpan) - 32;
                 horizontal += horizontalShift * (4 + star.Depth * 14);

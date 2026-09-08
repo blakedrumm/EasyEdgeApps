@@ -153,7 +153,7 @@ function Test-GuiSpaceRenderer {
         $center = New-Object Drawing.PointF(0.5, 0.5)
         $renderer.Render($graphics, $bitmap.Size, 0, $center, 0)
         $first = Get-GuiBitmapBytes $bitmap
-        $renderer.Render($graphics, $bitmap.Size, 20, $center, 0)
+        $renderer.Render($graphics, $bitmap.Size, 1, $center, 0)
         $later = Get-GuiBitmapBytes $bitmap
         $renderer.Render($graphics, $bitmap.Size, 0, (New-Object Drawing.PointF(0.85, 0.2)), 0)
         $ignoredPointer = Get-GuiBitmapBytes $bitmap
@@ -182,7 +182,7 @@ function Test-GuiSpaceRenderer {
         foreach ($sectorSample in $sectorSamples) {
             Assert-Gui ($sectorSample -gt $averageSectorSamples / 3 -and $sectorSample -lt $averageSectorSamples * 2) 'Stars must be scattered across the viewport without a concentrated galaxy core or empty outer regions.'
         }
-        Assert-Gui ($motionChanges -gt 1000 -and $brightSamples -gt 100 -and $stationarySamples -lt $brightSamples * 0.7) 'Stars must visibly change position on their own, not only change brightness or wait for mouse input.'
+        Assert-Gui ($motionChanges -gt 1000 -and $brightSamples -gt 100 -and $stationarySamples -lt $brightSamples * 0.35) 'Stars must drift noticeably within one second without mouse input, not only change brightness.'
         Assert-Gui ($hoverChanges -gt 1000) 'Pointer movement must add a separate layered parallax response.'
         $renderer.Render($graphics, $bitmap.Size, 0, $center, 0)
         $repeated = Get-GuiBitmapBytes $bitmap
