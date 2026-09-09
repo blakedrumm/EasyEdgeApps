@@ -18,7 +18,7 @@ $script:NextUpdateRequest = $null
 $script:UpdateRequestsStarted = 0
 
 function New-ToolUpdateRequest {
-    param([string]$Version = '1.4.0', [switch]$Fail)
+    param([string]$Version = '1.4.1', [switch]$Fail)
     $release = [pscustomobject]@{ tag_name = ('v' + $Version); html_url = ('https://github.com/blakedrumm/EasyEdgeApps/releases/tag/v' + $Version); draft = $false; prerelease = $false }
     $pipeline = [pscustomobject]@{ Info = (ConvertTo-EeaUpdateInfo $release); Fail = [bool]$Fail; Disposed = $false }
     $pipeline | Add-Member ScriptMethod EndInvoke { param($Pending) if ($this.Fail) { throw 'Synthetic update check failure.' }; return $this.Info }
@@ -225,7 +225,7 @@ try {
     Show-ToolTestForm $importForm
     Test-ToolFormLayout $importForm 'import'
     Assert-ToolGui ($importForm.Tag.Grid.Rows.Count -eq 1 -and -not $importForm.Tag.ApplyButton.Enabled) 'Import preview must start unselected.'
-    Assert-ToolGui ($importForm.Tag.Grid.Rows[0].Tag.Description.Contains('Current browsing: Not saved') -and $importForm.Tag.Grid.Rows[0].Tag.Description.Contains('After import: Normal Edge profile')) 'Import details must expose the resulting browsing mode before approval.'
+    Assert-ToolGui ($importForm.Tag.Grid.Rows[0].Tag.Description.Contains('Current browsing: Not saved') -and $importForm.Tag.Grid.Rows[0].Tag.Description.Contains('After import: Dedicated app profile (persistent)')) 'Import details must expose the resulting browsing mode before approval.'
     Assert-ToolGui (-not (Test-Path -LiteralPath $destination.Root)) 'Opening import preview must not install.'
     $importForm.Tag.AllCheck.Checked = $true
     $script:ApproveChange = $false
@@ -279,7 +279,7 @@ try {
     $checkForm = New-EeaSelectionForm -Mode Check -Context $destination
     Show-ToolTestForm $checkForm
     Test-ToolFormLayout $checkForm 'check'
-    Assert-ToolGui ($checkForm.Tag.Grid.Rows[0].Tag.Description.Contains('Configured browsing: Normal Edge profile') -and $checkForm.Tag.Details.ReadOnly) 'Check must expose configured browsing in its existing accessible read-only details.'
+    Assert-ToolGui ($checkForm.Tag.Grid.Rows[0].Tag.Description.Contains('Configured browsing: Dedicated app profile (persistent)') -and $checkForm.Tag.Details.ReadOnly) 'Check must expose configured browsing in its existing accessible read-only details.'
     $checkForm.Tag.AllCheck.Checked = $true
     $script:ApproveChange = $false
     $checkForm.Tag.ApplyButton.PerformClick()
@@ -366,7 +366,7 @@ try {
     $settingsUi.OpenLogsButton.PerformClick()
     Assert-ToolGui ($settingsUi.StatusLabel.Text -ceq 'No diagnostic logs yet.') 'Opening a missing log folder must not create files or launch Explorer.'
     foreach ($outcome in @('Available', 'Current', 'Failure', 'Cancel')) {
-        $versionText = if ($outcome -eq 'Current') { (Get-EeaVersion).ToString() } else { '1.4.0' }
+        $versionText = if ($outcome -eq 'Current') { (Get-EeaVersion).ToString() } else { '1.4.1' }
         $script:NextUpdateRequest = New-ToolUpdateRequest -Version $versionText -Fail:($outcome -eq 'Failure')
         $request = $script:NextUpdateRequest
         $settingsUi.CheckUpdatesButton.PerformClick()
@@ -376,7 +376,7 @@ try {
         Complete-EeaFormUpdateCheck $settingsOwner
         Assert-ToolGui ($request.PowerShell.Disposed -and -not $settingsUi.UpdateSpinner.IsBusy -and $settingsUi.CheckUpdatesButton.Enabled -and -not $settingsOwner.Tag.UpdateTimer.Enabled -and -not $settingsUi.CancelUpdateButton.Visible) 'Every update outcome must dispose the worker and restore controls.'
         if ($outcome -eq 'Available') {
-            Assert-ToolGui ($settingsUi.DownloadUpdateButton.Visible -and $settingsOwner.Tag.DownloadUpdateItem.Available -and $settingsUi.UpdateLabel.Text.Contains('1.4.0')) 'New releases must expose the official download action and version.'
+            Assert-ToolGui ($settingsUi.DownloadUpdateButton.Visible -and $settingsOwner.Tag.DownloadUpdateItem.Available -and $settingsUi.UpdateLabel.Text.Contains('1.4.1')) 'New releases must expose the official download action and version.'
             Test-ToolFormLayout $settingsForm 'settings-update'
         }
         if ($outcome -eq 'Current') { Assert-ToolGui (-not $settingsUi.DownloadUpdateButton.Visible -and $settingsUi.UpdateLabel.Text -ceq 'You have the latest version.') 'Current releases must show the up-to-date state without a download action.' }

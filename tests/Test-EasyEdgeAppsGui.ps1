@@ -750,7 +750,7 @@ try {
                 }
             }
         }
-        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.TaskbarCheck, $ui.FreshSessionCheck, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
+        foreach ($requiredControl in @($ui.NameInput, $ui.UrlInput, $ui.NotesInput, $ui.DesktopCheck, $ui.StartMenuCheck, $ui.TaskbarCheck, $ui.FreshSessionCheck, $ui.DedicatedProfileCheck, $ui.LaunchModeCombo, $ui.AlwaysOnTopCheck, $ui.GetIconButton, $ui.CancelIconButton, $ui.ChooseIconButton, $ui.ClearIconButton, $ui.SaveButton, $ui.OpenButton, $ui.RemoveButton)) {
             $ui.EditorViewport.ScrollControlIntoView($requiredControl)
             [Windows.Forms.Application]::DoEvents()
             $controlBounds = $ui.EditorViewport.RectangleToClient($requiredControl.RectangleToScreen($requiredControl.ClientRectangle))
@@ -794,7 +794,9 @@ try {
     $ui.SaveButton.PerformClick()
     Assert-Gui ((Read-EeaManifest $context 'My News').Url -eq 'https://example.com/updated#/home') 'Declining replacement must preserve the existing website.'
     $ui.AppList.SelectedIndex = 0
+    Assert-Gui ($ui.AppList.SelectedIndex -eq -1 -and $ui.UrlInput.Text -ceq 'https://example.com/unwanted-change') 'Declining selection must preserve the rejected replacement draft.'
     $script:ApproveChange = $true
+    $ui.AppList.SelectedIndex = 0
     $ui.RemoveButton.PerformClick()
     Assert-Gui ($ui.AppList.Items.Count -eq 0) 'Confirmed removal must refresh the list.'
     Assert-Gui (-not $ui.TaskbarCheck.Checked) 'Removing a website must clear its taskbar choice from the editor.'

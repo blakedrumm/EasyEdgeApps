@@ -51,8 +51,8 @@ if ($CommandCase -ne 'All') {
             }
         }
         $commandOptions = switch ($CommandCase) {
-            Install { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; Notes = 'Synthetic CLI notes.'; Confirm = $false; Quiet = $true } }
-            InstallWithProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; EdgeProfile = 'Profile 1'; Unattended = $true } }
+            Install { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; Notes = 'Synthetic CLI notes.'; ProfileMode = 'Shared'; LaunchMode = 'Maximized'; Confirm = $false; Quiet = $true } }
+            InstallWithProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; EdgeProfile = 'Profile 1'; ProfileMode = 'Shared'; LaunchMode = 'Maximized'; Unattended = $true } }
             ClearProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; EdgeProfile = ''; Unattended = $true } }
             InvalidProfile { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/'; EdgeProfile = 'Profile 1" --injected'; Unattended = $true } }
             OpenWithProfile { @{ Action = 'Open'; Name = 'CLI website'; Unattended = $true } }
@@ -74,7 +74,7 @@ if ($CommandCase -ne 'All') {
             ImportProtected { @{ Action = 'ImportKit'; Path = $FixturePath; Password = $secret; Confirm = $false } }
             UnattendedImport { @{ Action = 'ImportKit'; Path = $FixturePath; Unattended = $true } }
             UnattendedWhatIf { @{ Action = 'ImportKit'; Path = $FixturePath; Unattended = $true; WhatIf = $true } }
-            UnattendedInstall { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; Launch = $true; Unattended = $true } }
+            UnattendedInstall { @{ Action = 'Install'; Name = 'CLI website'; Url = 'https://example.com/cli?view=large#/home'; ProfileMode = 'Shared'; LaunchMode = 'Maximized'; Launch = $true; Unattended = $true } }
             UnattendedOpen { @{ Action = 'Open'; Name = 'CLI website'; Unattended = $true } }
             UnattendedList { @{ Action = 'List'; Unattended = $true } }
             UnattendedExport { @{ Action = 'ExportKit'; Path = $FixturePath; Unattended = $true } }

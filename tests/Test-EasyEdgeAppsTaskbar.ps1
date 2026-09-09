@@ -35,7 +35,7 @@ try {
     Assert-TaskbarRejected { Show-EeaTaskbarShortcut -AppName 'Not saved' -Context $context -Confirm:$false }
     Assert-Taskbar (-not [IO.Directory]::Exists($testRoot)) 'Pinning an unsaved website must create no data.'
     $appName = 'News, tools & more'
-    $state = Install-EeaApp -AppName $appName -Website 'https://example.com/path?topic=news#latest' -EdgeProfile 'Profile 1' -Context $context -Confirm:$false
+    $state = Install-EeaApp -AppName $appName -Website 'https://example.com/path?topic=news#latest' -EdgeProfile 'Profile 1' -DedicatedProfile $false -LaunchMode Maximized -Context $context -Confirm:$false
     $paths = Get-EeaPaths $context $appName
     $taskbarType = Initialize-EeaTaskbarTypes
     $identityShortcut = Join-Path $testRoot 'Identity.lnk'
@@ -105,11 +105,11 @@ try {
     Assert-Taskbar ((Show-EeaTaskbarShortcut -AppName $appName -Context $context -Confirm:$false) -ceq $paths.StartMenu) 'Start-menu-only websites must support the same pinning assistance.'
     [void][IO.Directory]::CreateDirectory((Join-Path $context.Root '.pending'))
     Assert-TaskbarRejected { Show-EeaTaskbarShortcut -AppName $appName -Context $context -Confirm:$false }
-    Assert-Taskbar ($null -eq $state.PSObject.Properties['Taskbar']) 'Windows-owned pin state must not be represented as a saved placement flag.'
+    Assert-Taskbar (-not (Get-EeaStateTaskbar $state)) 'Opening pin assistance must not save a taskbar request or claim Windows pin state.'
     [IO.Directory]::Delete((Join-Path $context.Root '.pending'))
     $taskbarApp = Install-EeaApp -AppName 'Dedicated taskbar app' -Website 'https://example.com/' -Taskbar $true -EdgeProfile 'Profile 1' -Context $context -Confirm:$false
     $taskbarPaths = Get-EeaPaths $context $taskbarApp.Name
-    Assert-Taskbar ($taskbarApp.SchemaVersion -eq 3 -and (Get-EeaStateTaskbar $taskbarApp) -and -not (Get-EeaStateFreshSession $taskbarApp)) 'Taskbar opt-in must select a persistent app launcher, not fresh browsing or claimed Windows pin state.'
+    Assert-Taskbar ($taskbarApp.SchemaVersion -eq 4 -and (Get-EeaStateTaskbar $taskbarApp) -and (Get-EeaStateDedicatedProfile $taskbarApp) -and -not (Get-EeaStateFreshSession $taskbarApp)) 'Taskbar opt-in must select a persistent app launcher, not fresh browsing or claimed Windows pin state.'
     Assert-Taskbar ((Read-EeaShortcut $taskbarPaths.StartMenu).TargetPath -ieq $taskbarPaths.Launcher -and $taskbarType::GetShortcutAppId($taskbarPaths.StartMenu) -ceq ('EasyEdgeApps.Website.' + $taskbarPaths.Id)) 'Taskbar shortcuts must use their dedicated executable and exact per-website identity.'
     Assert-Taskbar ((Get-EeaChecks -AppNames $taskbarApp.Name -Context $context).Status -ceq 'Healthy') 'A new taskbar app must have current owned launcher metadata.'
     $queryInfo = New-Object Diagnostics.ProcessStartInfo($taskbarPaths.Launcher, '--pin-state')
@@ -155,9 +155,22 @@ try {
     Assert-Taskbar (-not (Test-EeaOwnedShortcut $taskbarPaths.StartMenu $taskbarApp $taskbarPaths)) 'Changing a taskbar identity must break shortcut ownership.'
     $taskbarType::SetShortcutAppId($taskbarPaths.StartMenu, ('EasyEdgeApps.Website.' + $taskbarPaths.Id))
     $taskbarApp = Install-EeaApp -AppName $taskbarApp.Name -Website $taskbarApp.Url -Taskbar $false -Context $context -Confirm:$false
-    Assert-Taskbar ($taskbarApp.SchemaVersion -eq 1 -and (Read-EeaShortcut $taskbarPaths.StartMenu).Arguments.Contains('--profile-directory="Profile 1"')) 'Explicit taskbar opt-out must restore the saved normal-profile route.'
+    Assert-Taskbar ($taskbarApp.SchemaVersion -eq 4 -and -not (Get-EeaStateTaskbar $taskbarApp) -and (Get-EeaStateDedicatedProfile $taskbarApp)) 'Taskbar opt-out must preserve an independent schema-4 dedicated-profile choice.'
+    $taskbarApp = Install-EeaApp -AppName $taskbarApp.Name -Website $taskbarApp.Url -DedicatedProfile $false -Context $context -Confirm:$false
+    Assert-Taskbar ($taskbarApp.SchemaVersion -eq 4 -and (Read-EeaShortcut $taskbarPaths.StartMenu).Arguments.Contains('--profile-directory="Profile 1"')) 'Explicit shared-profile selection must restore the saved normal-profile route.'
     Remove-EeaApp -AppName $taskbarApp.Name -Context $context -Confirm:$false
     Assert-Taskbar ([IO.File]::ReadAllText((Join-Path $profileRoot 'Cookies')) -ceq 'Synthetic retained taskbar data.') 'Taskbar opt-out and removal must preserve the separate persistent browser profile.'
+    $legacyApp = Install-EeaApp -AppName 'Legacy taskbar app' -Website 'https://example.com/' -Taskbar $true -LaunchMode Maximized -Context $context -Confirm:$false
+    $legacyPaths = Get-EeaPaths $context $legacyApp.Name
+    $legacyApp.SchemaVersion = 3
+    foreach ($field in @('DedicatedProfile', 'LaunchMode', 'AlwaysOnTop')) { $legacyApp.PSObject.Properties.Remove($field) }
+    [IO.File]::WriteAllText($legacyPaths.Manifest, ($legacyApp | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+    foreach ($shortcutPath in @($legacyPaths.Desktop, $legacyPaths.StartMenu)) {
+        Write-EeaShortcut -Path $shortcutPath -Target $legacyPaths.Launcher -Arguments '' -Description ('EasyEdgeApps:' + $legacyPaths.Id) -Icon ($legacyPaths.Icon + ',0') -AppId ('EasyEdgeApps.Website.' + $legacyPaths.Id) -WindowStyle 3
+    }
+    Assert-Taskbar ((Get-EeaChecks -AppNames $legacyApp.Name -Context $context).Status -ceq 'Healthy') 'The schema-3 fixture must retain the legacy maximized launcher and shortcut contract.'
+    $legacyApp = Install-EeaApp -AppName $legacyApp.Name -Website $legacyApp.Url -Taskbar $false -Context $context -Confirm:$false
+    Assert-Taskbar ($legacyApp.SchemaVersion -eq 1 -and -not (Test-EeaStateUsesLauncher $legacyApp) -and (Get-EeaChecks -AppNames $legacyApp.Name -Context $context).Status -ceq 'Healthy') 'A legacy Taskbar-only opt-out must preserve the old normal-profile transition without producing invalid schema-3 settings.'
     Write-Host 'PASS: Taskbar app opt-in, exact launcher and shortcut identities, supported pin request, WhatIf, update preservation, repair, kit exclusion, tampering, and explicit opt-out.'
     Write-Host ('PASS: Read-only taskbar pinning assistance, quoted Explorer selection, profile preservation, WhatIf, placement fallback, ownership checks, and recovery protection on PowerShell ' + $PSVersionTable.PSVersion + '.')
 }

@@ -19,6 +19,8 @@ $hostPaths = if ($BothHosts) { @((Get-Command powershell.exe -ErrorAction Stop).
 $suites = @('Test-EasyEdgeApps.ps1', 'Test-EasyEdgeAppsJson.ps1', 'Test-EasyEdgeAppsFavorites.ps1',
     'Test-EasyEdgeAppsWebsiteIcon.ps1', 'Test-EasyEdgeAppsSettings.ps1', 'Test-EasyEdgeAppsUpdates.ps1', 'Test-EasyEdgeAppsTaskbar.ps1',
     'Test-EasyEdgeAppsFreshSession.ps1',
+    'Test-EasyEdgeAppsWindowState.ps1', 'Test-EasyEdgeAppsLaunchSettings.ps1', 'Test-EasyEdgeAppsEditorState.ps1',
+    'Test-EasyEdgeAppsReleaseTools.ps1',
     'Test-EasyEdgeAppsKits.ps1', 'Test-EasyEdgeAppsCrypto.ps1', 'Test-EasyEdgeAppsKitFiles.ps1',
     'Test-EasyEdgeAppsCli.ps1', 'Test-EasyEdgeAppsGui.ps1', 'Test-EasyEdgeAppsToolsGui.ps1')
 foreach ($hostPath in $hostPaths) {

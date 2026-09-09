@@ -75,6 +75,15 @@ try {
     Assert-FreshSession ([EeaFreshSession]::TryCleanup($sessionsRoot, $invalidMarkerSession)) 'The exact owned marker must remain usable.'
     $arguments = [EeaFreshSession]::Arguments('https://example.com/?query=a%22b#/home', (Join-Path $testRoot 'Profile with spaces'))
     Assert-FreshSession ($arguments.Contains('--user-data-dir="') -and $arguments.Contains(' --guest ') -and $arguments.Contains('--disable-background-mode') -and -not $arguments.Contains('--profile-directory')) 'Fresh launches must use an isolated Guest profile without browser account sign-in or sync.'
+    $modeProfile = Join-Path $testRoot 'Profile with spaces'
+    Assert-FreshSession ([EeaFreshSession]::Arguments('https://example.com/', $modeProfile) -ceq [EeaFreshSession]::Arguments('https://example.com/', $modeProfile, $true, 1)) 'Legacy argument overloads must retain exactly the maximized launch behavior.'
+    foreach ($mode in @(0, 1, 2)) {
+        $modeArguments = [EeaFreshSession]::Arguments('https://example.com/', $modeProfile, $true, $mode)
+        Assert-FreshSession ($modeArguments.Contains(' --guest ') -and $modeArguments.Contains('--user-data-dir="')) 'Every launch mode must preserve isolated Guest browsing.'
+        Assert-FreshSession ($modeArguments.Contains('--start-maximized') -eq ($mode -eq 1) -and $modeArguments.Contains('--start-fullscreen') -eq ($mode -eq 2)) 'Launch mode must emit only the selected window switch.'
+    }
+    Assert-FreshSessionRejected { [EeaFreshSession]::Arguments('https://example.com/', $modeProfile, $true, -1) }
+    Assert-FreshSessionRejected { [EeaFreshSession]::Arguments('https://example.com/', $modeProfile, $true, 3) }
     Assert-FreshSession (-not (Get-EeaArguments 'https://example.com/' -EdgeProfile 'Profile 1').Contains('--guest')) 'Normal launches must keep their selected persistent profile without Guest mode.'
     $appProfile = Join-Path $testRoot 'AppProfile'
     $appLease = [EeaFreshSession]::OpenAppProfile($appProfile)
@@ -129,14 +138,14 @@ try {
     $saved = Install-EeaApp -AppName 'Fresh test' -Website 'https://example.com/' -EdgeProfile 'Profile 1' -FreshSession $true -Context $context -Confirm:$false
     $paths = Get-EeaPaths $context $saved.Name
     $shortcut = Read-EeaShortcut $paths.Desktop
-    Assert-FreshSession ($saved.SchemaVersion -eq 3 -and (Get-EeaStateFreshSession $saved) -and -not (Get-EeaStateTaskbar $saved) -and $saved.EdgeProfile -ceq 'Profile 1') 'Fresh apps must use a fail-closed app-window schema while retaining the normal-profile choice.'
+    Assert-FreshSession ($saved.SchemaVersion -eq 4 -and (Get-EeaStateFreshSession $saved) -and (Get-EeaStateDedicatedProfile $saved) -and -not (Get-EeaStateTaskbar $saved) -and $saved.EdgeProfile -ceq 'Profile 1') 'Fresh apps must use a fail-closed app-window schema while retaining the normal-profile choice.'
     Assert-FreshSession ($shortcut.TargetPath -ieq $paths.Launcher -and $shortcut.Arguments -ceq '' -and (Test-EeaOwnedShortcut $paths.Desktop $saved $paths)) 'Fresh shortcuts must target only their owned no-argument native launcher.'
     $manifestBytes = [IO.File]::ReadAllBytes($paths.Manifest)
     try {
         foreach ($mutation in @(
             { param($candidate) $candidate.SchemaVersion = '2' },
             { param($candidate) $candidate.SchemaVersion = 1 },
-            { param($candidate) $candidate.FreshSession = $false },
+            { param($candidate) $candidate.DedicatedProfile = 'true' },
             { param($candidate) $candidate.FreshSession = 'true' },
             { param($candidate) $candidate.PSObject.Properties.Remove('FreshSession') },
             { param($candidate) $candidate.Taskbar = 'true' },
@@ -194,8 +203,8 @@ try {
     $script:CurrentSessionSource = ${function:Get-EeaSessionLauncherSource}
     try {
         function Get-EeaSessionLauncherSource {
-            param($Website, $EdgePath, $AppName, [bool]$FreshSession = $true)
-            $currentSource = & $script:CurrentSessionSource -Website $Website -EdgePath $EdgePath -AppName $AppName -FreshSession $FreshSession
+            param($Website, $EdgePath, $AppName, [bool]$FreshSession = $true, [string]$LaunchMode = 'Maximized', [bool]$AlwaysOnTop = $false)
+            $currentSource = & $script:CurrentSessionSource -Website $Website -EdgePath $EdgePath -AppName $AppName -FreshSession $FreshSession -LaunchMode $LaunchMode -AlwaysOnTop $AlwaysOnTop
             $olderSource = $currentSource.Replace('(fresh ? " --guest" : "")', '(fresh ? "" : "")')
             if ($olderSource -ceq $currentSource) { throw 'The older-launcher fixture must omit Guest mode.' }
             return $olderSource

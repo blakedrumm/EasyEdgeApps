@@ -10,8 +10,8 @@ if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this interactive brows
 if ($DiagnoseCleanup) {
     $script:FreshSessionSourceFactory = ${function:Get-EeaSessionLauncherSource}
     function Get-EeaSessionLauncherSource {
-        param($Website, $EdgePath, $AppName, [bool]$FreshSession = $true)
-        $generatedSource = & $script:FreshSessionSourceFactory -Website $Website -EdgePath $EdgePath -AppName $AppName -FreshSession $FreshSession
+        param($Website, $EdgePath, $AppName, [bool]$FreshSession = $true, [string]$LaunchMode = 'Maximized', [bool]$AlwaysOnTop = $false)
+        $generatedSource = & $script:FreshSessionSourceFactory -Website $Website -EdgePath $EdgePath -AppName $AppName -FreshSession $FreshSession -LaunchMode $LaunchMode -AlwaysOnTop $AlwaysOnTop
         foreach ($exceptionType in @('IOException', 'UnauthorizedAccessException', 'InvalidOperationException')) {
             $generatedSource = $generatedSource.Replace(('catch (' + $exceptionType + ') { return false; }'), ('catch (' + $exceptionType + ' failure) { File.WriteAllText(Path.Combine(root, "cleanup-error.txt"), failure.ToString()); return false; }'))
         }

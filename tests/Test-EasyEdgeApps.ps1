@@ -131,6 +131,17 @@ try {
         Assert-Rejected { Install-EeaApp -AppName 'Other News' -Website 'https://example.org/' -Context $context -Confirm:$false } '*already exists*'
         Assert-Equal ([IO.File]::ReadAllText($foreignPath)) 'An unrelated file'
     }
+    Test-Case 'Missing settings never authorize retained app data adoption' {
+        $retainedPaths = Get-EeaPaths $context 'Retained data'
+        [void][IO.Directory]::CreateDirectory((Join-Path $retainedPaths.Directory 'AppProfile'))
+        $sentinel = Join-Path $retainedPaths.Directory 'AppProfile\Cookies'
+        [IO.File]::WriteAllText($sentinel, 'Synthetic retained private data')
+        $originalHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+        Assert-Rejected { Install-EeaApp -AppName 'Retained data' -Website 'https://example.com/' -Context $context -Confirm:$false } '*retained or unrecognized files*'
+        Assert-Equal (Test-Path -LiteralPath $retainedPaths.Manifest) $false
+        Assert-Equal (Test-Path -LiteralPath $retainedPaths.Desktop) $false
+        Assert-Equal (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash $originalHash
+    }
     Test-Case 'External shortcut edits block both update and removal' {
         $paths = Get-EeaPaths $context 'My News'
         $originalBytes = [IO.File]::ReadAllBytes($paths.Desktop)

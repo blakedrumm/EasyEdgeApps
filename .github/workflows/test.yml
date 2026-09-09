@@ -45,11 +45,17 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build launcher and validate MSI
         run: pwsh.exe -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tools/Build-Installer.ps1
-      - name: Verify published predecessor
+      - name: Verify published predecessors
         run: |
-          $previous = Join-Path $env:RUNNER_TEMP 'EasyEdgeApps-1.3.2-x64.msi'
-          Invoke-WebRequest -Uri 'https://github.com/blakedrumm/EasyEdgeApps/releases/download/v1.3.2/EasyEdgeApps-1.3.2-x64.msi' -OutFile $previous
-          if ((Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash -ine 'd11eecfb3155029006c74e02ad545609606abffd5b2b7d809e74b8f9b930241f') { throw 'Published predecessor checksum mismatch.' }
+          $predecessors = @{
+            '1.3.2' = 'd11eecfb3155029006c74e02ad545609606abffd5b2b7d809e74b8f9b930241f'
+            '1.3.3' = 'de78d13b76b1d05c1325c55599215e5e36592f8143258f0e42bc17fffe2af61a'
+          }
+          foreach ($version in $predecessors.Keys) {
+            $previous = Join-Path $env:RUNNER_TEMP "EasyEdgeApps-$version-x64.msi"
+            Invoke-WebRequest -Uri "https://github.com/blakedrumm/EasyEdgeApps/releases/download/v$version/EasyEdgeApps-$version-x64.msi" -OutFile $previous
+            if ((Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash -ine $predecessors[$version]) { throw "Published $version predecessor checksum mismatch." }
+          }
       - name: Prove install-location regression check
         run: |
           $packages = @(Get-ChildItem -LiteralPath ./artifacts -Filter 'EasyEdgeApps-*-x64.msi' -File)
@@ -90,9 +96,11 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw "MSI lifecycle failed in $hostExecutable." }
               & $hostExecutable -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-EasyEdgeAppsInstaller.ps1 -MsiPath $packages[0].FullName -InstallLifecycle -PreviousMsiPath (Join-Path $env:RUNNER_TEMP 'EasyEdgeApps-1.3.2-x64.msi') -PreviousMsiSha256 'd11eecfb3155029006c74e02ad545609606abffd5b2b7d809e74b8f9b930241f'
               if ($LASTEXITCODE -ne 0) { throw "Authentic predecessor upgrade failed in $hostExecutable." }
+              & $hostExecutable -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-EasyEdgeAppsInstaller.ps1 -MsiPath $packages[0].FullName -InstallLifecycle -PreviousMsiPath (Join-Path $env:RUNNER_TEMP 'EasyEdgeApps-1.3.3-x64.msi') -PreviousMsiSha256 'de78d13b76b1d05c1325c55599215e5e36592f8143258f0e42bc17fffe2af61a'
+              if ($LASTEXITCODE -ne 0) { throw "Published 1.3.3 upgrade failed in $hostExecutable." }
           }
       - name: Retain tested MSI
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: tested-msi
           path: artifacts/EasyEdgeApps-*-x64.msi

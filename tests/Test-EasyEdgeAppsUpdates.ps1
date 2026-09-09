@@ -68,7 +68,7 @@ function Assert-UpdateRejected {
 }
 
 function New-UpdateRelease {
-    param([string]$Version = '1.4.0')
+    param([string]$Version = '1.4.1')
     return [pscustomobject]@{ tag_name = ('v' + $Version); html_url = ('https://github.com/blakedrumm/EasyEdgeApps/releases/tag/v' + $Version); draft = $false; prerelease = $false }
 }
 
@@ -100,7 +100,7 @@ try {
     Assert-Update ($info.UpdateAvailable -and $handler.Address -ceq 'https://api.github.com/repos/blakedrumm/EasyEdgeApps/releases/latest' -and -not $handler.SawCredentials) 'Update checks must use only the fixed endpoint without browser credentials.'
     $request = Start-EeaUpdateRequest -Client $client
     $results = @($request.PowerShell.EndInvoke($request.AsyncResult))
-    Assert-Update (-not $request.PowerShell.HadErrors -and $results.Count -eq 1 -and $results[0].LatestVersion -ceq '1.4.0') 'The real background worker must return validated update information.'
+    Assert-Update (-not $request.PowerShell.HadErrors -and $results.Count -eq 1 -and $results[0].LatestVersion -ceq '1.4.1') 'The real background worker must return validated update information.'
     $request.PowerShell.Dispose()
     $request.Cancellation.Dispose()
     $request = $null

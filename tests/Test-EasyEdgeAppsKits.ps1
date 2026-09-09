@@ -61,7 +61,7 @@ try {
         Assert-Kit ($exported.Apps[0].Url -ceq $httpKit.Apps[0].Url) 'HTTP addresses must stay explicit and portable.'
         $paths = Get-EeaPaths $httpContext 'My News'
         $shortcut = Read-EeaShortcut $paths.StartMenu
-        Assert-Kit ($shortcut.Arguments -ceq (Get-EeaArguments $httpKit.Apps[0].Url)) 'The imported shortcut must launch the approved HTTP address directly.'
+        Assert-Kit ((Test-EeaOwnedShortcut $paths.StartMenu (Read-EeaManifest $httpContext 'My News') $paths) -and (Read-EeaManifest $httpContext 'My News').Url -ceq $httpKit.Apps[0].Url) 'The imported shortcut and its validated launcher must preserve the approved HTTP address.'
     }
     Test-KitCase 'Repeated import is unchanged and byte-identical' {
         $paths = Get-EeaPaths $destination 'My News'
@@ -113,7 +113,7 @@ try {
         foreach ($fresh in @($false, $true)) {
             foreach ($taskbar in @($false, $true)) {
                 $appName = 'Mode ' + $fresh + ' ' + $taskbar
-                $saved = Install-EeaApp -AppName $appName -Website 'https://example.com/' -FreshSession $fresh -Taskbar $taskbar -Context $modeContext -Confirm:$false
+                $saved = Install-EeaApp -AppName $appName -Website 'https://example.com/' -FreshSession $fresh -Taskbar $taskbar -DedicatedProfile $taskbar -LaunchMode Maximized -Context $modeContext -Confirm:$false
                 $expectedCurrent = if ($fresh) { 'Fresh Guest session (temporary)' } elseif ($taskbar) { 'Dedicated app profile (persistent)' } else { 'Normal Edge profile' }
                 Assert-Kit ((Get-EeaChecks -AppNames $appName -Context $modeContext).BrowsingMode -ceq $expectedCurrent) 'Check must derive the configured mode from validated settings, with Fresh taking precedence.'
                 foreach ($kitCase in @(@{ Version = 1; Fresh = $null }, @{ Version = 2; Fresh = $false }, @{ Version = 2; Fresh = $true }, @{ Version = 2; Fresh = $null })) {
@@ -188,6 +188,20 @@ try {
         $importPreview = @(Get-EeaKitPreview -Kit $changed -Context $destination)
         $null = Install-EeaApp -AppName 'My News' -Website 'https://example.com/other' -Context $destination -Confirm:$false
         Assert-KitRejected { Import-EeaKit -Kit $changed -ExpectedPreview $importPreview -Context $destination -Confirm:$false } '*changed after the preview*'
+    }
+    Test-KitCase 'Approval is bound to the complete reviewed kit definition' {
+        $bindingContext = New-KitTestContext 'PreviewBinding'
+        $null = Import-EeaKit -Kit $script:Kit -Context $bindingContext -Confirm:$false
+        $candidate = Copy-TestKit $script:Kit
+        $candidate.SchemaVersion = 2
+        $candidate.Apps[0].Notes = 'Reviewed change'
+        $candidate.Apps[0] | Add-Member -NotePropertyName FreshSession -NotePropertyValue $false
+        $preview = @(Get-EeaKitPreview -Kit $candidate -Context $bindingContext)
+        $path = (Get-EeaPaths $bindingContext $candidate.Apps[0].Name).Manifest
+        $before = (Get-FileHash -LiteralPath $path).Hash
+        $candidate.Apps[0].FreshSession = $true
+        Assert-KitRejected { Import-EeaKit -Kit $candidate -ExpectedPreview $preview -Context $bindingContext -Confirm:$false } '*changed after the preview*'
+        Assert-Kit ((Get-FileHash -LiteralPath $path).Hash -ceq $before) 'A changed definition must be rejected before any selected app is changed.'
     }
     Test-KitCase 'Entire kit validation rejects unsafe data before installation' {
         foreach ($mutation in @(

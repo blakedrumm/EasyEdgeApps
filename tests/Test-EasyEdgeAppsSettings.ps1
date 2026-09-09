@@ -74,7 +74,7 @@ try {
     Assert-Settings ([IO.File]::Exists($logPath)) 'Log cleanup WhatIf must preserve logs.'
     Clear-EeaDebugLogs -Context $context -Confirm:$false
     Assert-Settings (-not [IO.File]::Exists($logPath) -and [IO.File]::Exists($unrelated) -and [IO.File]::Exists($settingsPath)) 'Log cleanup must preserve preferences and unrelated files.'
-    $savedApp = Install-EeaApp -AppName 'Profile test' -Website 'https://example.com/' -Context $context -Confirm:$false
+    $savedApp = Install-EeaApp -AppName 'Profile test' -Website 'https://example.com/' -DedicatedProfile $false -LaunchMode Maximized -Context $context -Confirm:$false
     $appPaths = Get-EeaPaths $context $savedApp.Name
     Assert-Settings ($savedApp.EdgeProfile -ceq 'Profile 1' -and (Read-EeaShortcut $appPaths.Desktop).Arguments -ceq '--app="https://example.com/" --start-maximized --profile-directory="Profile 1"') 'New shortcuts must record and launch the configured default profile safely.'
     $settings.DefaultEdgeProfile = 'Profile 2'

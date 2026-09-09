@@ -417,6 +417,47 @@ function Test-WebsiteIconFailureResults {
     Write-Host 'PASS: Direct and worker blocked, missing, unsupported, transport, timeout, and mixed-failure classification without private details or extra probes.'
 }
 
+function Test-WebsiteIconFrames {
+    param([byte[]]$LargePng)
+    $smallBitmap = New-Object Drawing.Bitmap(128, 128)
+    $graphics = [Drawing.Graphics]::FromImage($smallBitmap)
+    $smallPng = New-Object IO.MemoryStream
+    $source = New-Object IO.MemoryStream
+    $writer = New-Object IO.BinaryWriter($source)
+    try {
+        $graphics.Clear([Drawing.Color]::OrangeRed)
+        $smallBitmap.Save($smallPng, [Drawing.Imaging.ImageFormat]::Png)
+        $frames = @([pscustomobject]@{ Size = 256; Bytes = $LargePng }, [pscustomobject]@{ Size = 128; Bytes = $smallPng.ToArray() })
+        $writer.Write([uint16]0)
+        $writer.Write([uint16]1)
+        $writer.Write([uint16]2)
+        $offset = 38
+        foreach ($frame in $frames) {
+            $dimension = if ($frame.Size -eq 256) { 0 } else { $frame.Size }
+            $writer.Write([byte]$dimension)
+            $writer.Write([byte]$dimension)
+            $writer.Write([uint16]0)
+            $writer.Write([uint16]1)
+            $writer.Write([uint16]32)
+            $writer.Write([uint32]$frame.Bytes.Length)
+            $writer.Write([uint32]$offset)
+            $offset += $frame.Bytes.Length
+        }
+        foreach ($frame in $frames) { $writer.Write([byte[]]$frame.Bytes) }
+        $writer.Flush()
+        $converted = ConvertTo-EeaWebsiteIcon $source.ToArray()
+        $iconStream = New-Object IO.MemoryStream(,$converted)
+        $icon = New-Object Drawing.Icon($iconStream)
+        $bitmap = $icon.ToBitmap()
+        try {
+            $pixel = $bitmap.GetPixel(64, 64)
+            Assert-WebsiteIcon ($pixel.R -gt 220 -and $pixel.G -lt 100) 'A multi-frame ICO must decode the smallest adequate frame instead of always selecting the largest.'
+        }
+        finally { $bitmap.Dispose(); $icon.Dispose(); $iconStream.Dispose() }
+    }
+    finally { $writer.Dispose(); $source.Dispose(); $smallPng.Dispose(); $graphics.Dispose(); $smallBitmap.Dispose() }
+}
+
 function Test-WebsiteIconWorker {
     param([byte[]]$PngBytes)
     $handler = New-Object EasyEdgeAppsWebsiteIconTests.Handler
@@ -511,6 +552,7 @@ try {
     [Array]::Copy([BitConverter]::GetBytes([uint32]22), 0, $pngOnlyIcon, 18, 4)
     [Array]::Copy($pngBytes, 0, $pngOnlyIcon, 22, $pngBytes.Length)
     Assert-EeaIconData (ConvertTo-EeaWebsiteIcon $pngOnlyIcon)
+    Test-WebsiteIconFrames $pngBytes
     $invalidDimensions = [byte[]]$pngBytes.Clone()
     [Array]::Copy([byte[]]@(0, 0, 0, 0), 0, $invalidDimensions, 16, 4)
     Assert-WebsiteIconRejected $invalidDimensions

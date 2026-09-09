@@ -31,6 +31,8 @@ Version 1.3.0 does not change this schema. Global preferences, update timestamps
 
 Version 1.3.3 also leaves the portable schemas unchanged. `Taskbar`, Windows pin state, and dedicated app profiles are not kit fields. Imports preserve a destination app's local Taskbar mode and never request pins; new apps default to Taskbar off. A kit that removes a taskbar app's required Start menu entry conflicts in preflight before any selected app is written. Explicitly clear Taskbar in setup first if that placement change is intended.
 
+Version 1.4.0 still uses portable schemas 1/2. `DedicatedProfile`, `LaunchMode`, `AlwaysOnTop`, and `.eea-window` geometry are not portable fields. New imports default to a separate persistent profile and RememberLast with topmost off; existing destination-local choices are preserved. Fresh remains the only portable browser-lifetime choice. A saved normal-profile identifier is retained but unused while a separate or Fresh profile is active. No normal browser data is copied during import or explicit conversion.
+
 | Field | Validation |
 | --- | --- |
 | Product | Exact string `EasyEdgeApps.AppKit` |
@@ -72,7 +74,7 @@ Exports with at least one fresh website use schema 2, which requires application
 
 Schema 2 applies each app's session choice explicitly. Missing `FreshSession` canonicalizes to false and can therefore disable an existing destination's fresh sessions. The preview discloses a return to persistent browsing; normal approval or reviewed unattended approval is required. Selected GUI/CLI subsets preserve their source schema. Schema 1 imports retain an existing app's local session choice and default new apps to normal browsing.
 
-Only this Boolean is portable. Temporary profiles, executable bytes, source, hashes, paths, normal Edge profile identifiers, and browser data are never included. Import generates the launcher locally using the destination's Edge path and platform compiler. Local fresh-app manifests used schema 2 in 1.3.2; new or repaired Fresh/Taskbar apps use schema 3 in 1.3.3. That separate nonportable contract includes explicit FreshSession/Taskbar Booleans and executable/source hashes; it is not an App Kit. Older applications reject unsupported local manifests rather than silently switch profiles. Disabling Fresh on an existing taskbar app retains its dedicated persistent profile mode, not the normal Edge profile.
+Only this Boolean is portable. Profiles, executable bytes/source/hashes, paths, normal Edge profile identifiers, window preferences, geometry, and browser data are excluded. Import generates required launchers locally. Local manifests used Fresh schema 2 in 1.3.2 and Fresh/Taskbar schema 3 in 1.3.3; new apps and changed launch preferences use local schema 4 in 1.4.0. Local schema 4 validates dedicated-profile and window choices plus hashes when a launcher is required. This is not an App Kit. Legacy local schemas remain readable, and older applications reject unsupported newer state rather than silently change profiles. Disabling Fresh retains the existing local profile route.
 
 The encrypted envelope remains version 1 and authenticates either complete inner payload schema. Its algorithms, KDF, bounds, and associated-data bytes do not change. See [fresh-session boundaries](../SECURITY.md#fresh-session-boundaries) for cleanup and sign-in limits.
 
@@ -160,6 +162,8 @@ Export computes the selected representation in memory and stages only that repre
 Unlocking creates no decrypted kit file. After approval, installation intentionally writes ordinary cleartext app settings, `.lnk` shortcuts, and any locally generated fresh-session launcher through the existing owned-file transaction path. Secrets are never appropriate in URLs or notes. There is no password storage, plaintext fallback, auto-login, or website probing.
 
 Imports do not remove apps absent from a kit. Identical normalized app definitions with healthy owned files are unchanged. Each selected batch is fully validated and preflighted, then rechecked under the current-user/current-session mutex. Each app has staged writes and caught-error rollback; earlier successful apps remain after a later failure. Recovery, cross-session races, and power-loss limitations are unchanged.
+
+New previews bind the source kit schema and complete canonical app definition with `DefinitionHash`, in addition to the destination snapshot. A change to any reviewed app field requires a new preview; legacy tokenless callers retain their previous compatibility contract. A nonempty destination app directory without its manifest is a conflict, including when it contains retained browser-profile markers. Import does not infer ownership or recreate missing metadata to adopt that data.
 
 ## References and review
 
