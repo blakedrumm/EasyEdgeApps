@@ -102,7 +102,7 @@ try {
     $processSession = [EeaFreshSession]::CreateSession($sessionsRoot)
     $markerPath = Join-Path $processSession 'completed.txt'
     $commandPath = Join-Path $env:WINDIR 'System32\cmd.exe'
-    [EeaFreshSession]::RunProcess($commandPath, ('/d /c "echo done>""' + $markerPath + '"""'), $processSession)
+    [EeaFreshSession]::RunProcess($commandPath, ('/d /c echo done>"' + $markerPath + '"'), $processSession)
     Assert-FreshSession ([IO.File]::Exists($markerPath)) 'The job must launch the assigned process and wait for completion.'
     Assert-FreshSession ([EeaFreshSession]::TryCleanup($sessionsRoot, $processSession)) 'Completed job data must be removable.'
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'

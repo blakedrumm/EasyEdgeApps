@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EasyEdgeApps.Core/EasyEdgeApps.Core.csproj" />
+    <Project Path="src/EasyEdgeApps.Persistence/EasyEdgeApps.Persistence.csproj" />
+    <Project Path="src/EasyEdgeApps.Windows/EasyEdgeApps.Windows.csproj" />
+    <Project Path="src/EasyEdgeApps.SiteLauncher/EasyEdgeApps.SiteLauncher.csproj" />
+    <Project Path="src/EasyEdgeApps.Manager/EasyEdgeApps.Manager.csproj" />
+    <Project Path="src/EasyEdgeApps.Cli/EasyEdgeApps.Cli.csproj" />
+    <Project Path="src/EasyEdgeApps.ImageWorker/EasyEdgeApps.ImageWorker.csproj" />
+    <Project Path="src/EasyEdgeApps.PackageIndex/EasyEdgeApps.PackageIndex.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EasyEdgeApps.NativeFixture/EasyEdgeApps.NativeFixture.csproj" />
+    <Project Path="tests/EasyEdgeApps.Core.Tests/EasyEdgeApps.Core.Tests.csproj" />
+    <Project Path="tests/EasyEdgeApps.Windows.Tests/EasyEdgeApps.Windows.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <IsPackable>false</IsPackable><IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" PrivateAssets="all" />
+    <ProjectReference Include="../../src/EasyEdgeApps.Windows/EasyEdgeApps.Windows.csproj" />
+    <ProjectReference Include="../../src/EasyEdgeApps.Cli/EasyEdgeApps.Cli.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/EasyEdgeApps.ImageWorker/EasyEdgeApps.ImageWorker.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../EasyEdgeApps.NativeFixture/EasyEdgeApps.NativeFixture.csproj" ReferenceOutputAssembly="false" />
+    <Compile Include="../EasyEdgeApps.Core.Tests/TransactionTests.cs" Link="TransactionTests.cs" />
+    <Compile Include="../fixtures/WindowProbe.cs" Link="WindowProbe.cs" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

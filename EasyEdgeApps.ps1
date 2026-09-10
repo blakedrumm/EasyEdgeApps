@@ -767,12 +767,16 @@ public static class EeaFreshSession
         }
         finally
         {
-            if (windowController != null) windowController.Dispose();
-            if (process.Process != IntPtr.Zero && !assigned) TerminateProcess(process.Process, 1);
-            if (process.Thread != IntPtr.Zero) CloseHandle(process.Thread);
-            if (process.Process != IntPtr.Zero) CloseHandle(process.Process);
-            if (job != IntPtr.Zero) CloseHandle(job);
-            if (completion != IntPtr.Zero) CloseHandle(completion);
+            try { if (windowController != null) windowController.Dispose(); }
+            finally
+            {
+                if (assigned) TerminateJobObject(job, 1);
+                if (process.Process != IntPtr.Zero && !assigned) TerminateProcess(process.Process, 1);
+                if (process.Thread != IntPtr.Zero) CloseHandle(process.Thread);
+                if (process.Process != IntPtr.Zero) CloseHandle(process.Process);
+                if (job != IntPtr.Zero) CloseHandle(job);
+                if (completion != IntPtr.Zero) CloseHandle(completion);
+            }
         }
     }
 
@@ -837,6 +841,8 @@ public static class EeaFreshSession
     private static extern uint ResumeThread(IntPtr thread);
     [DllImport("kernel32.dll")]
     private static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll")]
+    private static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll")]
     private static extern bool CloseHandle(IntPtr handle);
 }
@@ -966,7 +972,6 @@ namespace EasyEdgeApps.Windowing
         public Controller(IntPtr job, string appId, string launcher, int mode, bool topmost)
         {
             if (job == IntPtr.Zero || mode < 0 || mode > 2) throw new ArgumentException("Invalid window controller.");
-            this.job = job;
             this.appId = appId;
             this.launcher = launcher;
             this.mode = mode;
@@ -975,7 +980,10 @@ namespace EasyEdgeApps.Windowing
             thread = new Thread(Run);
             thread.IsBackground = true;
             thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
+            IntPtr process = GetCurrentProcess();
+            if (!DuplicateHandle(process, job, process, out this.job, 0, false, 2)) throw new Win32Exception();
+            try { thread.Start(); }
+            catch { CloseHandle(this.job); ready.Dispose(); throw; }
             if (!ready.WaitOne(10000)) { Dispose(); throw new InvalidOperationException("Window controls could not initialize."); }
             try { CheckHealth(); } catch { Dispose(); throw; }
         }
@@ -992,10 +1000,11 @@ namespace EasyEdgeApps.Windowing
 
         private void Run()
         {
-            IntPtr previousDpi = SetThreadDpiAwarenessContext(new IntPtr(-4));
+            IntPtr previousDpi = IntPtr.Zero;
             System.Windows.Forms.Timer timer = null;
             try
             {
+                previousDpi = SetThreadDpiAwarenessContext(new IntPtr(-4));
                 lastPlacement = Placement.Read(statePath, appId);
                 context = new ApplicationContext();
                 sink = new MessageSink(this);
@@ -1015,14 +1024,18 @@ namespace EasyEdgeApps.Windowing
             catch (Exception exception) { failure = exception; ready.Set(); }
             finally
             {
-                if (timer != null) timer.Dispose();
-                if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
-                if (locationHook != IntPtr.Zero) UnhookWinEvent(locationHook);
-                keyboardHook = locationHook = IntPtr.Zero;
-                if (mode == 0 && lastPlacement != null && File.Exists(launcher)) Placement.Write(statePath, appId, lastPlacement);
-                if (sink != null) sink.DestroyHandle();
-                if (context != null) context.Dispose();
-                if (previousDpi != IntPtr.Zero) SetThreadDpiAwarenessContext(previousDpi);
+                try
+                {
+                    if (timer != null) timer.Dispose();
+                    if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
+                    if (locationHook != IntPtr.Zero) UnhookWinEvent(locationHook);
+                    keyboardHook = locationHook = IntPtr.Zero;
+                    if (mode == 0 && lastPlacement != null && File.Exists(launcher)) Placement.Write(statePath, appId, lastPlacement);
+                    if (sink != null) sink.DestroyHandle();
+                    if (context != null) context.Dispose();
+                    if (previousDpi != IntPtr.Zero) SetThreadDpiAwarenessContext(previousDpi);
+                }
+                finally { CloseHandle(job); }
             }
         }
 
@@ -1204,6 +1217,8 @@ namespace EasyEdgeApps.Windowing
         [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint process);
         [DllImport("kernel32.dll")] private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool belongs);
         [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target, uint access, bool inherit, uint options);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rectangle rectangle);
         [DllImport("user32.dll")] private static extern IntPtr MonitorFromRect(ref Rectangle rectangle, uint flags);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInformation information);
@@ -3294,6 +3309,19 @@ function Invoke-EeaLocked {
     }
 }
 
+function Assert-EeaWindowSettings {
+    [CmdletBinding()]
+    param(
+        [bool]$FreshSession,
+        [bool]$DedicatedProfile,
+        [ValidateSet('RememberLast', 'Maximized', 'FullScreen')][string]$LaunchMode,
+        [bool]$AlwaysOnTop
+    )
+
+    if ($AlwaysOnTop -and $LaunchMode -eq 'FullScreen') { throw 'Always on top is available for remembered or maximized windows, not full screen.' }
+    if (-not $FreshSession -and -not $DedicatedProfile -and ($AlwaysOnTop -or $LaunchMode -eq 'FullScreen')) { throw 'Full screen and Always on top require a dedicated or Fresh profile. Change the website window or profile choice explicitly before importing; normal Edge data is never copied.' }
+}
+
 function Install-EeaApp {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -3347,8 +3375,7 @@ function Install-EeaApp {
         if ($savedTaskbar) { $savedDedicated = $true }
         $savedLaunchMode = if ($launchModeProvided) { switch ($LaunchMode) { 'RememberLast' { 'RememberLast' }; 'Maximized' { 'Maximized' }; 'FullScreen' { 'FullScreen' } } } elseif ($null -ne $previousState) { Get-EeaStateLaunchMode $previousState } else { 'RememberLast' }
         $savedAlwaysOnTop = if ($alwaysOnTopProvided) { $AlwaysOnTop } elseif ($null -ne $previousState) { Get-EeaStateAlwaysOnTop $previousState } else { $false }
-        if ($savedAlwaysOnTop -and $savedLaunchMode -eq 'FullScreen') { throw 'Always on top is available for remembered or maximized windows, not full screen.' }
-        if (-not $savedFreshSession -and -not $savedDedicated -and ($savedAlwaysOnTop -or $savedLaunchMode -eq 'FullScreen')) { throw 'Full screen and Always on top require a dedicated or Fresh profile. Enable one explicitly; normal Edge data is never copied.' }
+        Assert-EeaWindowSettings -FreshSession $savedFreshSession -DedicatedProfile $savedDedicated -LaunchMode $savedLaunchMode -AlwaysOnTop $savedAlwaysOnTop
         $windowSettings = $null -eq $previousState -or $previousState.SchemaVersion -eq 4 -or $dedicatedProvided -or $launchModeProvided -or $alwaysOnTopProvided
         if ($savedTaskbar -and -not $StartMenu) { throw 'Taskbar apps require a Start menu shortcut for Windows pinning.' }
         Invoke-EeaTransaction -Context $Context -Prepare {
@@ -3798,6 +3825,9 @@ function Get-EeaKitPreview {
             $nextFresh = if ($validated.SchemaVersion -eq 1 -and $null -ne $state) { Get-EeaStateFreshSession $state } else { Get-EeaStateFreshSession $app }
             $nextTaskbar = $null -ne $state -and (Get-EeaStateTaskbar $state)
             $nextDedicated = $null -eq $state -or (Get-EeaStateDedicatedProfile $state)
+            $nextLaunchMode = if ($null -ne $state) { Get-EeaStateLaunchMode $state } else { 'RememberLast' }
+            $nextAlwaysOnTop = $null -ne $state -and (Get-EeaStateAlwaysOnTop $state)
+            Assert-EeaWindowSettings -FreshSession $nextFresh -DedicatedProfile $nextDedicated -LaunchMode $nextLaunchMode -AlwaysOnTop $nextAlwaysOnTop
             $browsingMode = Get-EeaBrowsingMode ([pscustomobject]@{ SchemaVersion = 4; FreshSession = $nextFresh; Taskbar = $nextTaskbar; DedicatedProfile = $nextDedicated })
         }
         catch { $action = 'Conflict'; $detail = $_.Exception.Message; $browsingMode = 'Unknown' }

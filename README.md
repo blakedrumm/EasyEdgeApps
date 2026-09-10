@@ -4,6 +4,8 @@
 
 # Easy Edge Apps
 
+**Compiled prerelease:** [Easy Edge Apps 2.0.0 Preview 1](https://github.com/blakedrumm/EasyEdgeApps/releases/tag/v2.0.0-preview.1) contains the C#/.NET 10 and WinUI 3 successor. It is unsigned and not production-ready. [Run the portable preview with isolated data](docs/Compiled-Preview.md#run-the-current-c-gui); see the [release notes](docs/releases/v2.0.0-preview.1.md), [validation and screenshots](docs/Compiled-Validation.md), and [parity guide](docs/Compiled-Preview.md) for limits. Live legacy migration is disabled. Version 1.4.0 remains the stable PowerShell release described below.
+
 Turn trusted websites into easy-to-find Microsoft Edge app-window shortcuts on Windows 11. Install Easy Edge Apps as a normal Windows application, or use the same self-contained PowerShell script as a portable tool.
 
 A helper sets it up once in the person's Windows account. Everyday use is opening a familiar Desktop, Start menu, or approved taskbar shortcut, with no PowerShell window or administrator prompt. New apps use a separate persistent Edge profile and a small Windows launcher; existing shared-profile shortcuts still open Edge directly.

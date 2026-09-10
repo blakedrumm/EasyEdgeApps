@@ -6,10 +6,24 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
+#if !EEA_MODERN_RUNTIME
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
+#endif
 
 public static class FreshSessionProcessFixture
 {
+    private static string ExecutablePath
+    {
+        get
+        {
+#if EEA_MODERN_RUNTIME
+            return Environment.ProcessPath;
+#else
+            return Assembly.GetExecutingAssembly().Location;
+#endif
+        }
+    }
+
     private static string Command(string mode, string directory, string readyName, string releaseName)
     {
         return mode + " \"" + directory + "\" \"" + readyName + "\" \"" + releaseName + "\"";
@@ -17,7 +31,7 @@ public static class FreshSessionProcessFixture
 
     private static Process Start(string arguments)
     {
-        return Process.Start(new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, arguments) { UseShellExecute = false, CreateNoWindow = true });
+        return Process.Start(new ProcessStartInfo(ExecutablePath, arguments) { UseShellExecute = false, CreateNoWindow = true });
     }
 
     private static void Check(bool condition, string message)
@@ -58,7 +72,7 @@ public static class FreshSessionProcessFixture
             string directory = EeaFreshSession.CreateSession(root);
             Task running = Task.Factory.StartNew(delegate
             {
-                EeaFreshSession.RunProcess(Assembly.GetExecutingAssembly().Location, Command("parent", directory, readyName, releaseName), directory);
+                EeaFreshSession.RunProcess(ExecutablePath, Command("parent", directory, readyName, releaseName), directory);
             });
             try
             {
@@ -102,6 +116,11 @@ public static class FreshSessionProcessFixture
     {
         try
         {
+#if EEA_MODERN_RUNTIME
+            if (arguments.Length == 1 && arguments[0] == ".png") return EasyEdgeApps.NativeFixture.SyntheticDecoder.WaitForCancellation();
+            if (arguments.Length == 1 && arguments[0] == "--pin") return EasyEdgeApps.NativeFixture.SyntheticPin.WaitForCancellation();
+            if (arguments.Length == 2 && arguments[0] == "window") return EasyEdgeApps.NativeFixture.SyntheticWindow.Run(arguments[1]);
+#endif
             if (arguments[0] == "verify") { Verify(arguments[1]); return 0; }
             string directory = arguments[1];
             if (arguments[0] == "child")
@@ -121,7 +140,7 @@ public static class FreshSessionProcessFixture
             }
             else if (arguments[0] == "supervisor")
             {
-                EeaFreshSession.RunProcess(Assembly.GetExecutingAssembly().Location, Command("parent", directory, arguments[2], arguments[3]), directory);
+                EeaFreshSession.RunProcess(ExecutablePath, Command("parent", directory, arguments[2], arguments[3]), directory);
             }
             else { return 3; }
             return 0;
@@ -132,9 +151,13 @@ public static class FreshSessionProcessFixture
             bool blockLongPaths;
             AppContext.TryGetSwitch("Switch.System.IO.UseLegacyPathHandling", out legacyPaths);
             AppContext.TryGetSwitch("Switch.System.IO.BlockLongPaths", out blockLongPaths);
+#if EEA_MODERN_RUNTIME
+            Console.Error.WriteLine("Runtime: " + Environment.Version + "; target: " + AppContext.TargetFrameworkName);
+#else
             Console.Error.WriteLine("Runtime: " + Environment.Version + "; target: " + AppDomain.CurrentDomain.SetupInformation.TargetFrameworkName);
-            Console.Error.WriteLine("Legacy paths: " + legacyPaths + "; block long paths: " + blockLongPaths);
             Console.Error.WriteLine("Configuration: " + AppDomain.CurrentDomain.SetupInformation.ConfigurationFile);
+#endif
+            Console.Error.WriteLine("Legacy paths: " + legacyPaths + "; block long paths: " + blockLongPaths);
             Console.Error.WriteLine(failure.ToString());
             return 1;
         }

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <AssemblyName>EasyEdgeApps.NativeFixture</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <DefineConstants>$(DefineConstants);EEA_MODERN_RUNTIME</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../fixtures/FreshSessionProcess.cs" Link="FreshSessionProcess.cs" />
+    <ProjectReference Include="../../src/EasyEdgeApps.Windows/EasyEdgeApps.Windows.csproj" />
+  </ItemGroup>
+</Project>

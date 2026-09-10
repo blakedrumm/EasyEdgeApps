@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Svg" Version="3.4.8" />
+    <ProjectReference Include="../EasyEdgeApps.Core/EasyEdgeApps.Core.csproj" />
+    <ProjectReference Include="../EasyEdgeApps.Persistence/EasyEdgeApps.Persistence.csproj" />
+    <Compile Include="../EasyEdgeApps.SiteLauncher/Native.generated.cs" Link="Native.generated.cs" />
+    <Compile Include="../EasyEdgeApps.SiteLauncher/LaunchConfiguration.cs" Link="LaunchConfiguration.cs" />
+  </ItemGroup>
+</Project>

@@ -264,7 +264,7 @@ try {
     $sessionKit.Apps[0].FreshSession = $false
     $disableSessionForm = New-EeaSelectionForm -Mode Import -Kit $sessionKit -Context $sessionContext
     Show-ToolTestForm $disableSessionForm
-    Assert-ToolGui ($disableSessionForm.Tag.Grid.Rows[0].Tag.Description.Contains('FRESH SESSIONS DISABLED')) 'GUI kit preview must disclose a requested return to persistent browsing.'
+    Assert-ToolGui ($disableSessionForm.Tag.Grid.Rows[0].Tag.Description.Contains('FRESH SESSIONS DISABLED')) ('GUI kit preview must disclose a requested return to persistent browsing. Actual: ' + $disableSessionForm.Tag.Grid.Rows[0].Tag.Description)
     $disableSessionForm.Tag.AllCheck.Checked = $true
     $script:ApproveChange = $false
     $disableSessionForm.Tag.ApplyButton.PerformClick()

@@ -1,0 +1,150 @@
+<Window x:Class="EasyEdgeApps.Manager.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:automation="using:Microsoft.UI.Xaml.Automation"
+    xmlns:core="using:EasyEdgeApps.Core"
+    xmlns:persistence="using:EasyEdgeApps.Persistence"
+    xmlns:local="using:EasyEdgeApps.Manager"
+    Title="Easy Edge Apps">
+    <UserControl x:Name="AppearanceRoot">
+    <UserControl.Resources>
+        <ResourceDictionary>
+        <ResourceDictionary.ThemeDictionaries>
+            <ResourceDictionary x:Key="Default"><SolidColorBrush x:Key="EditorFieldBrush" Color="White"/></ResourceDictionary>
+            <ResourceDictionary x:Key="Light"><SolidColorBrush x:Key="EditorFieldBrush" Color="White"/></ResourceDictionary>
+            <ResourceDictionary x:Key="Dark"><SolidColorBrush x:Key="EditorFieldBrush" Color="#10171D"/></ResourceDictionary>
+            <ResourceDictionary x:Key="HighContrast"><SolidColorBrush x:Key="EditorFieldBrush" Color="{ThemeResource SystemColorWindowColor}"/></ResourceDictionary>
+        </ResourceDictionary.ThemeDictionaries>
+        <Style TargetType="Button"><Setter Property="MinHeight" Value="36"/><Setter Property="CornerRadius" Value="2"/></Style>
+        <Style TargetType="TextBox"><Setter Property="MinHeight" Value="32"/><Setter Property="CornerRadius" Value="0"/><Setter Property="Background" Value="{ThemeResource EditorFieldBrush}"/></Style>
+        <Style TargetType="CheckBox"><Setter Property="MinHeight" Value="32"/><Setter Property="Padding" Value="8,0,0,0"/></Style>
+        <Style TargetType="ComboBox"><Setter Property="MinHeight" Value="32"/><Setter Property="CornerRadius" Value="0"/></Style>
+        <DataTemplate x:Key="FavoriteCandidateTemplate" x:DataType="core:FavoriteCandidate">
+            <StackPanel Spacing="2" Padding="0,4">
+                <TextBlock Text="{x:Bind Name}" TextWrapping="Wrap" FontWeight="SemiBold"/>
+                <TextBlock Text="{x:Bind Url}" TextWrapping="Wrap"/>
+                <TextBlock Text="{x:Bind Folder}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                <TextBlock Text="{x:Bind Reason}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            </StackPanel>
+        </DataTemplate>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    <Image x:Name="SceneImage" Stretch="Fill" IsHitTestVisible="False" automation:AutomationProperties.AccessibilityView="Raw"/>
+    <Grid x:Name="Shell" Padding="20" RowSpacing="12" SizeChanged="ShellSizeChanged" Background="Transparent">
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="S" Modifiers="Control" Invoked="SaveAccelerator"/>
+            <KeyboardAccelerator Key="N" Modifiers="Control" Invoked="NewAccelerator"/>
+        </Grid.KeyboardAccelerators>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid ColumnSpacing="12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Image x:Name="BrandImage" Width="36" Height="36" automation:AutomationProperties.Name="Easy Edge Apps" />
+            <StackPanel Grid.Column="1"><TextBlock Text="Easy Edge Apps" FontSize="24" FontWeight="SemiBold"/><TextBlock Text="Blake Drumm" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
+            <CheckBox x:Name="MotionChoice" Grid.Column="2" Content="Motion" VerticalAlignment="Center" Checked="MotionChanged" Unchecked="MotionChanged" automation:AutomationProperties.AutomationId="BackgroundMotion" automation:AutomationProperties.Name="Animate the space background" ToolTipService.ToolTip="Pause or resume the space background"/>
+            <ComboBox x:Name="ThemeChoice" Grid.Column="3" Width="124" VerticalAlignment="Center" SelectedIndex="0" SelectionChanged="ThemeChanged" automation:AutomationProperties.Name="Theme">
+                <x:String>Original</x:String><x:String>System</x:String><x:String>Light</x:String><x:String>Dark</x:String>
+            </ComboBox>
+            <Button x:Name="PreferencesButton" Grid.Column="4" Width="36" Height="36" Padding="0" VerticalAlignment="Center" Click="PreferencesClicked" ToolTipService.ToolTip="Settings and updates" automation:AutomationProperties.Name="Settings and updates" automation:AutomationProperties.AutomationId="OpenPreferences"><SymbolIcon Symbol="Setting"/></Button>
+        </Grid>
+        <Grid x:Name="Body" Grid.Row="1" ColumnSpacing="20" RowSpacing="12">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="0.34*"/><ColumnDefinition Width="0.66*"/></Grid.ColumnDefinitions>
+            <Grid x:Name="WebsitePanel" Grid.RowSpan="2" RowSpacing="8">
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="List"/><TextBlock Text="Websites" VerticalAlignment="Center"/></StackPanel>
+                <Border Grid.Row="1" Background="{ThemeResource EditorFieldBrush}" BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                <ListView x:Name="WebsiteList" SelectionMode="Single" SelectionChanged="SelectionChanged" automation:AutomationProperties.Name="Saved websites" automation:AutomationProperties.AutomationId="WebsiteList">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="persistence:AppRecord">
+                            <TextBlock Text="{x:Bind Definition.DisplayName}" TextWrapping="Wrap"/>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                </Border>
+                <Button x:Name="NewButton" Grid.Row="2" MinWidth="112" Click="NewClicked" ToolTipService.ToolTip="New website" automation:AutomationProperties.AutomationId="NewWebsite"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Add"/><TextBlock Text="New"/></StackPanel></Button>
+            </Grid>
+            <Grid x:Name="EditorColumn" Grid.Column="1" Grid.RowSpan="2" RowSpacing="8">
+            <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <ScrollViewer x:Name="EditorScroll" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" automation:AutomationProperties.AutomationId="EditorScroll">
+                <StackPanel x:Name="EditorPanel" Spacing="8" HorizontalAlignment="Stretch">
+                    <TextBox x:Name="NameInput" Header="Name" MaxLength="60" TextChanged="InputChanged" automation:AutomationProperties.AutomationId="WebsiteName"/>
+                    <TextBox x:Name="AddressInput" Header="Website address" TextChanged="InputChanged" MaxLength="2048" automation:AutomationProperties.AutomationId="WebsiteAddress"/>
+                    <TextBox x:Name="NotesInput" Header="Helper notes (optional)" MaxLength="4000" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="88" MaxHeight="112" TextChanged="InputChanged" automation:AutomationProperties.AutomationId="WebsiteNotes"/>
+                    <local:FlowPanel Spacing="16">
+                        <CheckBox x:Name="DesktopChoice" Content="Desktop" IsChecked="True" Checked="ChoiceChanged" Unchecked="ChoiceChanged" automation:AutomationProperties.AutomationId="DesktopPlacement"/>
+                        <CheckBox x:Name="StartChoice" Content="Start menu" IsChecked="True" Checked="ChoiceChanged" Unchecked="ChoiceChanged" automation:AutomationProperties.AutomationId="StartMenuPlacement"/>
+                        <CheckBox x:Name="TaskbarChoice" Content="Taskbar" Checked="ChoiceChanged" Unchecked="ChoiceChanged" automation:AutomationProperties.AutomationId="TaskbarIdentity" automation:AutomationProperties.Name="Request a taskbar pin for this website" automation:AutomationProperties.HelpText="Request Windows approval when saving. Requires a Start menu entry and a dedicated profile. Clearing this choice does not remove an existing pin." ToolTipService.ToolTip="Request Windows approval when saving. Requires a Start menu entry and a dedicated profile. Clearing this choice does not remove an existing pin."/>
+                    </local:FlowPanel>
+                    <local:FlowPanel Spacing="16">
+                        <CheckBox x:Name="DedicatedChoice" Content="Separate app profile" IsChecked="True" Checked="ChoiceChanged" Unchecked="ChoiceChanged" automation:AutomationProperties.AutomationId="DedicatedProfile"/>
+                        <CheckBox x:Name="FreshChoice" Content="Fresh session each time" Checked="ChoiceChanged" Unchecked="ChoiceChanged" automation:AutomationProperties.AutomationId="FreshSession"/>
+                    </local:FlowPanel>
+                    <local:FlowPanel Spacing="12">
+                        <TextBlock Text="Open window" Margin="0,6,0,0"/>
+                        <ComboBox x:Name="WindowChoice" MinWidth="208" SelectedIndex="0" SelectionChanged="WindowChanged" automation:AutomationProperties.Name="Window launch mode" automation:AutomationProperties.AutomationId="WindowLaunchMode">
+                            <x:String>Remember last size</x:String><x:String>Maximized</x:String><x:String>Full screen</x:String>
+                        </ComboBox>
+                        <CheckBox x:Name="TopmostChoice" Content="Always on top" Checked="ChoiceChanged" Unchecked="ChoiceChanged" automation:AutomationProperties.AutomationId="AlwaysOnTop"/>
+                    </local:FlowPanel>
+                    <local:FlowPanel x:Name="IconCommands" Spacing="8" AllowDrop="True" DragOver="IconDragOver" Drop="IconDropped">
+                        <Image x:Name="IconPreview" Width="48" Height="48" automation:AutomationProperties.Name="Website icon preview"/>
+                        <Button Click="FetchIconClicked" ToolTipService.ToolTip="Fetch website icon" automation:AutomationProperties.Name="Fetch website icon"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Download"/><TextBlock Text="Get icon"/></StackPanel></Button>
+                        <Button Click="CancelWorkClicked" Width="36" Height="36" Padding="0" ToolTipService.ToolTip="Cancel pending work" automation:AutomationProperties.Name="Cancel work"><SymbolIcon Symbol="Cancel"/></Button>
+                        <Button Click="ChooseIconClicked" ToolTipService.ToolTip="Choose ICO, PNG, JPEG, GIF, BMP or static SVG" automation:AutomationProperties.Name="Choose icon"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Pictures"/><TextBlock Text="Choose icon..."/></StackPanel></Button>
+                        <Button Click="SavedIconClicked" ToolTipService.ToolTip="Discard the pending icon and use the saved icon" automation:AutomationProperties.Name="Use saved icon" automation:AutomationProperties.AutomationId="UseSavedIcon"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Pictures"/><TextBlock Text="Use saved icon"/></StackPanel></Button>
+                        <Button Click="ResetIconClicked" Width="36" Height="36" Padding="0" ToolTipService.ToolTip="Use automatic icon" automation:AutomationProperties.Name="Automatic icon"><SymbolIcon Symbol="Refresh"/></Button>
+                    </local:FlowPanel>
+                    <TextBlock x:Name="IconStatus" Text="Automatic" TextWrapping="Wrap" automation:AutomationProperties.AutomationId="IconStatus"/>
+                    <Expander x:Name="AdvancedPanel" Header="Profile details" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" automation:AutomationProperties.AutomationId="AdvancedSettings">
+                        <StackPanel Spacing="12">
+                            <TextBlock x:Name="ProfileSummary" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <TextBox x:Name="ProfileInput" Header="Normal Edge profile" PlaceholderText="Default, Profile 1, or empty" TextChanged="InputChanged" automation:AutomationProperties.AutomationId="NormalEdgeProfile"/>
+                        </StackPanel>
+                    </Expander>
+                    <InfoBar x:Name="ValidationBar" IsOpen="False" IsClosable="False" Severity="Warning"/>
+                </StackPanel>
+            </ScrollViewer>
+            <local:FlowPanel Grid.Row="1" Spacing="8">
+                <Button x:Name="SaveButton" Click="SaveClicked" Style="{StaticResource AccentButtonStyle}" ToolTipService.ToolTip="Save website" automation:AutomationProperties.AutomationId="SaveWebsite"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Save"/><TextBlock x:Name="SaveLabel" Text="Add website"/></StackPanel></Button>
+                <Button x:Name="LaunchButton" Click="LaunchClicked" ToolTipService.ToolTip="Open saved website"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="OpenFile"/><TextBlock Text="Open"/></StackPanel></Button>
+                <Button x:Name="RemoveButton" Click="RemoveClicked" ToolTipService.ToolTip="Remove owned shortcuts and keep browser data" automation:AutomationProperties.AutomationId="RemoveWebsite"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Delete"/><TextBlock Text="Remove..."/></StackPanel></Button>
+            </local:FlowPanel>
+            </Grid>
+        </Grid>
+        <Grid Grid.Row="2" ColumnSpacing="12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <ProgressRing x:Name="Activity" Width="20" Height="20" IsActive="False" automation:AutomationProperties.Name="Working"/>
+            <TextBlock x:Name="Status" Grid.Column="1" Text="Ready" TextWrapping="Wrap" automation:AutomationProperties.LiveSetting="Polite" automation:AutomationProperties.AutomationId="Status"/>
+            <Button x:Name="CancelOperationButton" Grid.Column="2" Width="36" Height="36" Padding="0" Visibility="Collapsed" Click="CancelWorkClicked" ToolTipService.ToolTip="Cancel current operation" automation:AutomationProperties.Name="Cancel current operation" automation:AutomationProperties.AutomationId="CancelOperation"><SymbolIcon Symbol="Cancel"/></Button>
+        </Grid>
+        <Grid Grid.Row="3" ColumnSpacing="8">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <local:FlowPanel x:Name="FooterActions" Spacing="8">
+                <Button Click="ExportKitClicked" automation:AutomationProperties.AutomationId="ExportKit" automation:AutomationProperties.Name="Export App Kit"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Upload"/><TextBlock Text="Export kit..."/></StackPanel></Button>
+                <Button Click="ImportKitClicked" automation:AutomationProperties.AutomationId="ImportKit" automation:AutomationProperties.Name="Import App Kit"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Download"/><TextBlock Text="Import kit..."/></StackPanel></Button>
+                <Button Click="FavoritesClicked" automation:AutomationProperties.AutomationId="ImportFavorites" automation:AutomationProperties.Name="Edge Favorites bar"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Favorite"/><TextBlock Text="Favorites..."/></StackPanel></Button>
+                <Button Click="CheckAppsClicked" automation:AutomationProperties.AutomationId="CheckApps" automation:AutomationProperties.Name="Check and Repair Apps"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Accept"/><TextBlock Text="Check apps..."/></StackPanel></Button>
+                <Button Click="CloseClicked" automation:AutomationProperties.Name="Close"><StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Cancel"/><TextBlock Text="Close"/></StackPanel></Button>
+            </local:FlowPanel>
+            <CommandBar x:Name="MainCommands" Grid.Column="1" DefaultLabelPosition="Right" HorizontalAlignment="Right" VerticalAlignment="Top" IsDynamicOverflowEnabled="False">
+                <CommandBar.SecondaryCommands>
+                    <AppBarButton Icon="Refresh" Label="Repair selected website" Click="RepairClicked"/>
+                    <AppBarButton Icon="ViewAll" Label="My Websites" Click="WebsitesClicked"/>
+                    <AppBarSeparator/>
+                    <AppBarButton Icon="Switch" Label="Migrate legacy website" Click="MigrateClicked"/>
+                    <AppBarButton Icon="Undo" Label="Roll back migration" Click="RollbackClicked"/>
+                    <AppBarButton Icon="Sync" Label="Recovery" Click="RecoveryClicked"/>
+                    <AppBarSeparator/>
+                    <AppBarButton Icon="Help" Label="Support report" Click="SupportClicked"/>
+                    <AppBarButton Icon="Setting" Label="Preferences" Click="PreferencesClicked"/>
+                    <AppBarButton Icon="Download" Label="Check for updates" Click="UpdatesClicked"/>
+                    <AppBarButton Icon="Download" Label="Review downloaded update" Click="ReviewDownloadedUpdateClicked"/>
+                    <AppBarButton Icon="Pin" Label="Taskbar pinning" Click="TaskbarClicked"/>
+                </CommandBar.SecondaryCommands>
+            </CommandBar>
+        </Grid>
+    </Grid>
+    </Grid>
+    </UserControl>
+</Window>

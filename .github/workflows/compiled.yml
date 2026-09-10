@@ -1,0 +1,81 @@
+name: Compiled Windows Checks
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compiled:
+    name: Self-contained compiled preview
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '10.0.x'
+      - name: Locked restore, native parity, branding, ZIP and MSI build
+        run: |
+          & pwsh.exe -NoLogo -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File ./tools/Build-Compiled.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled package build failed.' }
+      - name: Core, Windows, interoperability and actual package checks
+        run: |
+          $env:EEA_COMPILED_BUILD_RESULT = (Resolve-Path ./artifacts/compiled/build-result.json).Path
+          $build = Get-Content -LiteralPath $env:EEA_COMPILED_BUILD_RESULT -Raw | ConvertFrom-Json
+          $env:EEA_COMPILED_MSI = $build.Msi
+          & dotnet test ./tests/EasyEdgeApps.Core.Tests/EasyEdgeApps.Core.Tests.csproj -c Release --no-restore --logger 'trx;LogFileName=core.trx' --results-directory ./artifacts/compiled-test-results
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled core tests failed.' }
+          & dotnet test ./tests/EasyEdgeApps.Windows.Tests/EasyEdgeApps.Windows.Tests.csproj -c Release --no-restore --logger 'trx;LogFileName=windows.trx' --results-directory ./artifacts/compiled-test-results
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled Windows tests failed.' }
+      - name: Actual published WinUI workflow without Edge or installation
+        run: |
+          $build = Get-Content -LiteralPath ./artifacts/compiled/build-result.json -Raw | ConvertFrom-Json
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-CompiledManager.ps1 -ManagerPath (Join-Path $build.PortableDirectory 'EasyEdgeApps.Manager.exe') -ScreenshotDirectory (Join-Path $PWD 'artifacts/compiled-ui')
+          if ($LASTEXITCODE -ne 0) { throw 'Published WinUI automation failed.' }
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/Test-CompiledManager.ps1 -ManagerPath (Join-Path $build.PortableDirectory 'EasyEdgeApps.Manager.exe') -TextSize 24 -Theme Light -ScreenshotDirectory (Join-Path $PWD 'artifacts/compiled-ui-large')
+          if ($LASTEXITCODE -ne 0) { throw 'Published large-text WinUI automation failed.' }
+      - name: Focused published Favorites, Settings, window and appearance parity
+        run: |
+          $build = Get-Content -LiteralPath ./artifacts/compiled/build-result.json -Raw | ConvertFrom-Json
+          $manager = Join-Path $build.PortableDirectory 'EasyEdgeApps.Manager.exe'
+          $workflows = @(
+            @{ Name = 'favorites'; Arguments = @('-FavoritesOnly', '-TextSize', '24', '-Theme', 'Light') }
+            @{ Name = 'settings'; Arguments = @('-SettingsOnly', '-LegacySettingsPoints', '14') }
+            @{ Name = 'windows'; Arguments = @('-WindowChoicesOnly', '-TextSize', '24', '-Theme', 'Light') }
+            @{ Name = 'appearance'; Arguments = @('-AppearanceOnly', '-Theme', 'System') }
+          )
+          foreach ($workflow in $workflows) {
+            $arguments = @('-NoLogo', '-NoProfile', '-MTA', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', './tests/Test-CompiledManager.ps1', '-ManagerPath', $manager, '-ScreenshotDirectory', (Join-Path $PWD ('artifacts/compiled-ui-' + $workflow.Name))) + $workflow.Arguments
+            & powershell.exe @arguments
+            if ($LASTEXITCODE -ne 0) { throw ('Published ' + $workflow.Name + ' parity failed.') }
+          }
+      - name: Retain unsigned artifacts and validation evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: unsigned-compiled-preview-and-evidence
+          path: |
+            artifacts/compiled/*.zip
+            artifacts/compiled/*.msi
+            artifacts/compiled/SHA256SUMS.txt
+            artifacts/compiled/build-result.json
+            artifacts/compiled-test-results/
+            artifacts/compiled-ui/
+            artifacts/compiled-ui-large/
+            artifacts/compiled-ui-favorites/
+            artifacts/compiled-ui-settings/
+            artifacts/compiled-ui-windows/
+            artifacts/compiled-ui-appearance/
+          if-no-files-found: error
+          retention-days: 14
