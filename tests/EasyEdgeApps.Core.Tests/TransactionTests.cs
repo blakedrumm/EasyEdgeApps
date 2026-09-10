@@ -56,7 +56,7 @@ public sealed class TransactionTests
         watcher.EnableRaisingEvents = true;
         using var blocker = new FileStream(secondPath, FileMode.Open, FileAccess.Read, FileShare.Read);
         var transaction = new FileTransaction(fixture.Layout);
-        var recovery = Task.Run(() => transaction.Recover(transactionId));
+        var recovery = Task.Factory.StartNew(() => transaction.Recover(transactionId), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         try
         {
             await staged.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -138,7 +138,7 @@ public sealed class TransactionTests
         watcher.Created += (_, _) => staged.TrySetResult();
         watcher.EnableRaisingEvents = true;
         using var reader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var write = Task.Run(() => SafeFiles.AtomicWrite(path, "after"u8.ToArray()));
+        var write = Task.Factory.StartNew(() => SafeFiles.AtomicWrite(path, "after"u8.ToArray()), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         try
         {
             await staged.Task.WaitAsync(TimeSpan.FromSeconds(15));
