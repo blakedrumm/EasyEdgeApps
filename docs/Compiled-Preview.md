@@ -28,7 +28,7 @@ The [prepublication validation report](Compiled-Validation.md#current-delivery-p
 
 ## Build and Run an Isolated Preview
 
-Build on Windows 11 x64 with .NET SDK 10 installed. The SDK selection is controlled by [global.json](../global.json); dependencies are locked per project. The verified development SDK was 10.0.303, runtime 10.0.11. The build requires package restore access, the Windows SDK tools, and the existing Windows PowerShell/.NET Framework build tools for the retained legacy distribution. A compatible PowerShell 7 host can run the wrapper; `-STA` is required for the original branding and installer tooling.
+Build on Windows 11 x64 with .NET SDK **10.0.303** installed. [global.json](../global.json) pins that exact SDK without roll-forward, and both GitHub workflows install it from that file. Dependencies are locked per project. The first remote build selected a newer SDK's ILLink dependency and correctly failed locked restore; upgrade the SDK and its lockfiles together only after renewed validation. The verified runtime was 10.0.11. The build requires package restore access, the Windows SDK tools, and the existing Windows PowerShell/.NET Framework build tools for the retained legacy distribution. A compatible PowerShell 7 host can run the wrapper; `-STA` is required for the original branding and installer tooling.
 
 Use a fresh output directory, since the wrapper refuses to overwrite a previous archive or MSI:
 
