@@ -47,6 +47,13 @@ public sealed class MaintenanceTests
             helper?.Dispose();
             try { await request.WaitAsync(TimeSpan.FromSeconds(10)); }
             catch (OperationCanceledException) { }
+            for (var attempt = 0; ; attempt++)
+            {
+                try { File.Delete(launcher); break; }
+                catch (Exception failure) when (attempt < 49 &&
+                    (failure is UnauthorizedAccessException || failure is IOException && (failure.HResult & 0xffff) is 32 or 33))
+                { await Task.Delay(100); }
+            }
         }
     }
 
