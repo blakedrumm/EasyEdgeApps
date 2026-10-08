@@ -21,7 +21,7 @@ Do not include credentials, tokens, personal website addresses, account screensh
 - The Taskbar checkbox saves local app-mode intent and requests the documented Windows pin API through the verified website launcher. Windows requires user approval, and success requires a confirmed pin-state query. The tool does not use hidden verbs, edit taskbar registry data, bypass token or policy restrictions, or manage pins during import, repair, removal, or MSI maintenance. Stored intent is not authoritative Windows pin state.
 - Ownership checks are accident-prevention measures, not a sandbox against another process running as the same user, an administrator, or a compromised browser.
 - Browser security, cookies, and credentials remain in Edge's control. A helper may save a local launch-profile identifier, without reading or copying that profile's sign-in data. An app window is not kiosk isolation.
-- Multi-file changes support caught-error rollback, not guaranteed power-failure atomicity. Preserve recovery files when setup requests help.
+- Multi-file changes roll back after caught errors and after a stopped command (for example Ctrl+C), but are not guaranteed power-failure atomic. Preserve recovery files when setup requests help.
 
 ## Installer and updates
 
@@ -32,6 +32,8 @@ The manager launcher uses the absolute Windows PowerShell path and its adjacent 
 Update checking is off by default. Enabling it permits a check when setup opens or preferences are saved, at most once per 24 hours, including failed attempts. A manual check bypasses that delay. Requests use normal TLS validation, no cookies, authorization, referrer, default Windows credentials, or proxy credentials, and only `https://api.github.com/repos/blakedrumm/EasyEdgeApps/releases/latest`. Redirects are rejected before following them. Responses are limited to 64 KiB, strict UTF-8/data-only JSON, and the existing 8-second network deadline. Only stable published version tags and the exact matching official release-page URL are accepted.
 
 The checker does not execute release text, download assets, run an installer, or update the portable script. A detected update enables a button that opens the validated official release page in the default browser. Installation remains a separate user action. GitHub and network infrastructure can observe requests; no saved app names, URLs, notes, profile selections, logs, or browser data are sent. Repository ownership and GitHub's release metadata remain trust dependencies, not cryptographic update authentication.
+
+This section describes the PowerShell release. The unsigned 2.0 compiled preview behaves differently: after an explicit approval it can download the official MSI, require the pinned publisher signature and timestamp, and then start Windows Installer. Its default publisher pin is empty, which disables that handoff. See the [compiled preview guide](docs/Compiled-Preview.md) before relying on it.
 
 ## Fresh-session boundaries
 
@@ -120,6 +122,6 @@ Limits that remain important:
 - Authentication detects modification by someone without the password. It does not identify a sender, establish whether websites are trustworthy, or prevent a password holder from replacing kit content. Review old and new destinations, especially domain changes.
 - GUI password text, serialized strings, runtime copies, previews, and returned objects exist in managed memory. Clearable buffers and unmanaged allocations are cleared where feasible, but perfect erasure, swap/crash-dump secrecy, or protection from a compromised same-user process is not promised.
 - Installed URLs, notes, icons, shortcuts, rollback files, readable exports, and CLI output are not encrypted. Browser storage, sessions, websites, and network monitoring remain outside this protection. Never put credentials, tokens, reset links, or session secrets in configured URLs or helper notes.
-- Atomic replacement depends on the destination filesystem. OneDrive synchronization, network filesystems, antivirus/file locks, cross-session changes, machine crashes, and power loss require target-machine checks. Staging cleanup is best-effort after exceptional filesystem failures; preserve recovery evidence.
+- Atomic replacement depends on the destination filesystem. OneDrive synchronization, network filesystems, antivirus/file locks, cross-session changes, machine crashes, and power loss require target-machine checks. Brief sharing violations (Windows errors 32, 33, and 1175) are retried for under a second, rechecking that the destination is unchanged before each attempt; this narrows but does not close a same-user replacement race. Staging cleanup is best-effort after exceptional filesystem failures; preserve recovery evidence.
 
 Review should examine the crypto composition and metadata bytes, password encoding, parser and decoded-icon attack surface, bounds before expensive allocation/KDF work, constant-time comparison assumptions in supported runtimes, managed-memory exposure, and transaction race/failure behavior. Keep Windows, .NET, and Edge patched independently.

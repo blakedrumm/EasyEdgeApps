@@ -111,6 +111,24 @@ public sealed class EditorTests
     }
 
     [Fact]
+    public async Task IconRequestsReportWhetherTheirResultReachedTheDraft()
+    {
+        using var editor = new EditorSession(App("First"));
+        var superseded = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = editor.LoadIconAsync("first.png", _ => superseded.Task);
+        editor.CancelPending();
+        superseded.SetResult(WebsiteIconTests.ValidIcon());
+        Assert.False(await first);
+        Assert.Null(editor.Draft.IconBytes);
+        Assert.Equal("", editor.LastError);
+        Assert.False(editor.IsIconBlocked);
+        Assert.True(await editor.LoadIconAsync("second.png", _ => Task.FromResult(WebsiteIconTests.ValidIcon())));
+        Assert.Equal(WebsiteIconTests.ValidIcon(), editor.Draft.IconBytes);
+        Assert.False(await editor.LoadIconAsync("invalid.png", _ => throw new ValidationException("Synthetic bad image")));
+        Assert.True(editor.IsIconBlocked);
+    }
+
+    [Fact]
     public async Task SaveCancellationAndConcurrentEditsRemainRecoverable()
     {
         using var editor = new EditorSession(App("First"));

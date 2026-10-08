@@ -44,13 +44,14 @@ public sealed partial class MainWindow
         return await dialog.ShowAsync();
     }
 
-    private async Task<ContentDialogResult> Dialog(string title, UIElement content, string primary = "", string secondary = "", string close = "Cancel")
+    private async Task<ContentDialogResult> Dialog(string title, UIElement content, string primary = "", string secondary = "", string close = "Cancel", Action<ContentDialog>? configure = null)
     {
         var scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, MaxHeight = Math.Max(180, Shell.ActualHeight - 220) };
         AutomationProperties.SetAutomationId(scroll, "ToolDialogScroll");
         var dialog = new ContentDialog { XamlRoot = Shell.XamlRoot, FontSize = preferences.TextSize, Title = title, PrimaryButtonText = primary, SecondaryButtonText = secondary,
             CloseButtonText = close, DefaultButton = ContentDialogButton.Close,
             Content = scroll };
+        configure?.Invoke(dialog);
         return await ShowSizedDialog(dialog);
     }
 
@@ -592,8 +593,12 @@ public sealed partial class MainWindow
             var iconPath = store.Layout.Resolve(CatalogStore.Address(record, "Icon"));
             if (File.Exists(iconPath))
             {
-                using var stream = new MemoryStream(IconService.PreviewPng(SafeFiles.Read(iconPath, 1024 * 1024)));
-                await image.SetSourceAsync(stream.AsRandomAccessStream());
+                try
+                {
+                    using var stream = new MemoryStream(IconService.PreviewPng(SafeFiles.Read(iconPath, 1024 * 1024)));
+                    await image.SetSourceAsync(stream.AsRandomAccessStream());
+                }
+                catch (Exception failure) when (failure is not OperationCanceledException) { }
             }
             tile.Children.Add(new Image { Width = 64, Height = 64, Source = image });
             tile.Children.Add(Message(record.Definition.DisplayName));
@@ -625,7 +630,13 @@ public sealed partial class MainWindow
             selection.Items.Add(item);
             canRepair |= check.CanRepair;
         }
-        if (await Dialog("Check and Repair Apps", selection, canRepair ? "Repair selected" : "", close: "Close") != ContentDialogResult.Primary || selection.SelectedItems.Count == 0) return;
+        void RequireSelection(ContentDialog dialog)
+        {
+            dialog.IsPrimaryButtonEnabled = false;
+            selection.SelectionChanged += (_, _) => dialog.IsPrimaryButtonEnabled = selection.SelectedItems.Count > 0;
+        }
+        if (await Dialog("Check and Repair Apps", selection, canRepair ? "Repair selected" : "", close: "Close", configure: RequireSelection) != ContentDialogResult.Primary) return;
+        if (selection.SelectedItems.Count == 0) { SetStatus("Select one or more repairable websites, then choose Repair selected."); return; }
         var results = new StackPanel { Spacing = 12 };
         var expected = inspected.Hash;
         foreach (var selected in selection.SelectedItems.Cast<ListViewItem>().Where(item => item.IsEnabled).Select(item => item.Tag).OfType<AppRecord>())

@@ -126,7 +126,7 @@ Portable and MSI copies use the same per-user website data. New apps and changed
 - New apps use separate persistent profiles by default. Existing shared apps remain shared until explicitly converted. Website sign-ins and browser security remain in Edge's control.
 - **Fresh session each time** optionally starts a website in an independent empty Guest profile without Edge account sync and cleans up its cookies, cache, and site data after that session closes. It is off by default.
 - **Taskbar** requests a Windows-approved pin and gives the website its own window identity and icon. It uses a separate persistent app profile unless Fresh is also selected. Both options are off by default.
-- Setup uses native Windows controls, keyboard navigation, accessible names, and a resizable layout. Primary actions follow Windows highlight colors; high contrast restores system-colored controls. Destructive confirmation defaults to **No**.
+- Setup uses native Windows controls, keyboard navigation, accessible names, and a resizable layout. **Ctrl+S** saves the current website and **Ctrl+N** starts a new one, with the same unsaved-change protection as the buttons. Primary actions follow Windows highlight colors; high contrast restores system-colored controls. Destructive confirmation defaults to **No**.
 - The application logo is embedded in the script for the setup header and window icons; no separate branding file or download is needed at runtime.
 - **Windows-style controls:** Buttons, field/status labels, and checkboxes have icons, primary actions use system highlight colors, and textboxes support Ctrl+Backspace word deletion. Icons use the installed Segoe Fluent Icons font, falling back to Segoe MDL2 Assets or text-only controls. No fonts are bundled or downloaded. Text labels and keyboard navigation remain available; compact navigation buttons also have full accessible names and tooltips.
 - **Space background:** Setup has an original procedural starfield with stars scattered across a dark sky, noticeable independent drift, and softly eased mouse parallax. There are no spiral arms, central glow, or orbital motion. Stars keep moving when the mouse is outside the window or another application has focus. Clear **Motion** to pause it. Windows reduced-motion settings and remote sessions keep the scene still; high contrast removes it. Animation also pauses while setup is hidden, minimized, or being resized. The background is rendered locally inside the single script, with no web view, asset downloads, or background service. Website shortcuts are unaffected.
@@ -159,7 +159,7 @@ Scheme probes have a 5-second deadline per attempt; page requests have an 8-seco
 
 Open the installed manager or run the portable script again, select a saved website, and use **Save changes**, **Open**, or **Remove**. Changing an address updates that app's existing shortcuts. Running an install again with the same name also repairs missing shortcuts.
 
-Names identify apps and are case-insensitive. To rename one, add the new name, check it works, then remove the old entry. Removal keeps website accounts, cookies, passwords, history, and all other browser data. Files added by someone else are preserved.
+Names identify apps and are case-insensitive. They can use letters from any language, including names outside the computer's legacy Windows code page. To rename one, add the new name, check it works, then remove the old entry. Removal keeps website accounts, cookies, passwords, history, and all other browser data. Files added by someone else are preserved.
 
 Do not edit the managed shortcut, saved icon, or settings by hand. Setup refuses to replace or remove an existing shortcut whose ownership fields do not match. Move an unrelated conflicting shortcut out of the way yourself, or choose a different name; there is deliberately no force-overwrite option.
 
@@ -223,7 +223,7 @@ Repair does not probe private URLs, sign in, repair accounts, bypass permissions
 
 ## Command-line use
 
-Windows PowerShell 5.1 is built into Windows 11. PowerShell 7 on Windows is also supported. No modules need to be installed.
+Windows PowerShell 5.1 is built into Windows 11. PowerShell 7 on Windows is also supported. No modules need to be installed. The two editions capitalize a few letters differently (for example Georgian letters and the micro sign `µ`), which changes a saved app's identity. To keep apps readable by the installed manager, which uses Windows PowerShell 5.1, PowerShell 7 refuses to create new apps whose names contain those letters; use one edition for such names.
 
 Use `-Unattended` for explicitly approved, no-prompt operations and `-AppNames` for selected kit imports. See the [automation guide](docs/Automation.md) for complete action coverage, exit codes, JSON output, and caller-managed Windows-protected passwords. For built-in help, use `--help`, `-h`, `-Help`, or PowerShell's standard `-?` option.
 
@@ -355,7 +355,7 @@ Known folders are resolved through Windows rather than assuming a fixed Desktop 
 
 App IDs use SHA-256 of normalized names. Saved file paths are never used to choose where to write or delete. Shortcuts are checked against their ownership marker, expected executable, arguments, icon location, and schema-appropriate window style and Windows app identity. Saved icons and app launchers are hashed to detect outside changes. These checks protect against accidental replacement; someone who can change both your files and settings under the same Windows account is not a separate security boundary.
 
-Updates stage all output first, copy recovery data, use same-directory atomic replacement for each file, and write settings last. Caught failures trigger rollback. A per-user, per-Windows-session mutex prevents simultaneous changes in the same session. Operations spanning several files are not a single filesystem transaction and cannot guarantee crash or power-loss atomicity.
+Updates stage all output first, copy recovery data, use same-directory atomic replacement for each file, and write settings last. Caught failures and stopped commands (for example Ctrl+C) trigger rollback. A file briefly held open by antivirus scanning, search indexing, or File Explorer is retried for under a second; if something else changes that file meanwhile, it is left alone and the change is rolled back. A per-user, per-Windows-session mutex prevents simultaneous changes in the same session. Operations spanning several files are not a single filesystem transaction and cannot guarantee crash or power-loss atomicity.
 
 There is no application telemetry upload, automatic code installation, scheduled task, or service. The MSI registers its own product and HKCU installer markers; the portable script does not write registry settings. Optional update checks read only the fixed official GitHub endpoint. **Get icon** reads a bounded page prefix and streams icon images; it does not execute page scripts. Scheme resolution occurs only for a schemeless address submitted through setup. Opening a website makes the normal network requests performed by Edge and that website.
 
@@ -368,7 +368,7 @@ If setup reports that an earlier change needs recovery, stop making changes and 
 3. A technically competent helper should check each path belongs to this user's affected Easy Edge Apps entry, then restore the previous owned files from the available backups. Newly created files have `Existed: false` and should only be removed after verifying ownership. Leave unrelated files alone.
 4. Only after confirming the installed entry is consistent, move the remaining `.pending` folder aside and run setup again. Keep the recovery copy until the website works.
 
-A `complete.txt` file containing `EasyEdgeApps:complete:1` means the operation completed or was successfully rolled back, but Windows temporarily prevented cleanup, for example because of a lock or read-only staging file. Saved websites remain usable. The next change retries cleanup; do not disable antivirus or relax permissions indiscriminately to remove temporary files.
+A `complete.txt` file containing `EasyEdgeApps:complete:1` means the operation completed or was successfully rolled back, but Windows temporarily prevented cleanup, for example because of a lock or read-only staging file. Saved websites remain usable. The next change retries cleanup, clears read-only attributes on those temporary copies, and keeps the completion marker until cleanup succeeds; do not disable antivirus or relax permissions indiscriminately to remove temporary files. If another Easy Edge Apps change is still running, setup says so instead of asking for recovery.
 
 ## Verification and development
 

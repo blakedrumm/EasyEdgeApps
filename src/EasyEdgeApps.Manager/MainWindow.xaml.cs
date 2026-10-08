@@ -111,7 +111,8 @@ public sealed partial class MainWindow : Window
         {
             var record = store.Read().Catalog.Apps.Single(app => app.Definition.Id == editor.SelectedId);
             var iconPath = store.Layout.Resolve(CatalogStore.Address(record, "Icon"));
-            if (File.Exists(iconPath)) _ = ShowIcon(SafeFiles.Read(iconPath, 1024 * 1024));
+            try { if (File.Exists(iconPath)) _ = ShowIcon(SafeFiles.Read(iconPath, 1024 * 1024)); }
+            catch (Exception failure) when (failure is ValidationException or IOException or UnauthorizedAccessException) { SetStatus(SafeMessage(failure)); }
         }
         UpdateState();
     }
@@ -178,11 +179,12 @@ public sealed partial class MainWindow : Window
 
     private void UpdateState()
     {
-        if (NameInput is null) return;
+        if (NameInput is null || allowClose) return;
         ApplyTextSize(Shell);
         Activity.IsActive = editor.IsBusy || operationCancellation is not null;
-        CancelOperationButton.Visibility = operationCancellation is not null ? Visibility.Visible : Visibility.Collapsed;
-        CancelOperationButton.IsEnabled = operationCancellation is { IsCancellationRequested: false };
+        var iconWorkPending = editor.IsBusy && !editor.IsSaving;
+        CancelOperationButton.Visibility = operationCancellation is not null || iconWorkPending ? Visibility.Visible : Visibility.Collapsed;
+        CancelOperationButton.IsEnabled = operationCancellation is { IsCancellationRequested: false } || (operationCancellation is null && iconWorkPending);
         MainCommands.IsEnabled = !commandRunning;
         PreferencesButton.IsEnabled = !commandRunning;
         foreach (var action in FooterActions.Children.OfType<Control>()) action.IsEnabled = !commandRunning;
@@ -354,8 +356,7 @@ public sealed partial class MainWindow : Window
 
     private async Task LoadIconFile(string path)
     {
-        await editor.LoadIconAsync(path, token => iconWorker.FromFileAsync(path, token), lifetime.Token);
-        if (editor.Draft.IconBytes is not null) await ShowIcon(editor.Draft.IconBytes);
+        if (await editor.LoadIconAsync(path, token => iconWorker.FromFileAsync(path, token), lifetime.Token) && editor.Draft.IconBytes is not null) await ShowIcon(editor.Draft.IconBytes);
         UpdateState();
     }
 
@@ -365,12 +366,17 @@ public sealed partial class MainWindow : Window
         var website = AddressInput.Text;
         _ = Identity.Website(website, true);
         SetStatus("Fetching website icon...");
-        await editor.LoadWebsiteIconAsync("Website:" + website, async token =>
+        var applied = await editor.LoadWebsiteIconAsync("Website:" + website, async token =>
         {
             using var client = new WebsiteIconClient();
             return await client.FetchAsync(website, (image, conversionToken) => iconWorker.ConvertAsync(image.Bytes, image.Format, conversionToken), token);
         }, lifetime.Token);
-        if (editor.Draft.RequestedWebsite is null && editor.LastError.Length == 0)
+        if (!applied)
+        {
+            if (editor.LastError.Length != 0) SetStatus(editor.LastError);
+            return;
+        }
+        if (editor.Draft.RequestedWebsite is null)
         {
             var wasLoading = loading;
             loading = true;
@@ -378,7 +384,7 @@ public sealed partial class MainWindow : Window
             loading = wasLoading;
         }
         if (editor.Draft.IconBytes is not null) await ShowIcon(editor.Draft.IconBytes);
-        SetStatus(editor.LastError.Length == 0 ? "Website icon prepared." : editor.LastError);
+        SetStatus("Website icon prepared.");
     });
 
     private async void ResetIconClicked(object sender, RoutedEventArgs args) => await Run(ResetIcon);
@@ -431,7 +437,7 @@ public sealed partial class MainWindow : Window
 
     private void SetStatus(string message)
     {
-        if (Status.Text == message) return;
+        if (allowClose || Status.Text == message) return;
         Status.Text = message;
         var peer = FrameworkElementAutomationPeer.FromElement(Status) ?? FrameworkElementAutomationPeer.CreatePeerForElement(Status);
         peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);

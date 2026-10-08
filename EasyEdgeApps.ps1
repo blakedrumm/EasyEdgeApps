@@ -234,6 +234,23 @@ function ConvertTo-EeaName {
     return $cleanName
 }
 
+function Test-EeaEditionSpecificName {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Name)
+
+    # Windows PowerShell 5.1 leaves these letters unchanged when uppercasing, while PowerShell 7 does not, so their saved app identity differs by edition.
+    return $Name -cmatch '[\u00B5\u017F\u01C5\u01C8\u01CB\u01F2\u023F-\u0240\u0252\u025C\u0261\u0265-\u0266\u026A\u026C\u0282\u0287\u029D-\u029E\u0345\u03C2\u03D0-\u03D1\u03D5-\u03D6\u03F0-\u03F1\u03F3\u03F5\u0525\u0527\u0529\u052B\u052D\u052F\u10D0-\u10FA\u10FD-\u10FF\u13F8-\u13FD\u1C80-\u1C88\u1D8E\u1E9B\u1FBE\u2C5F\u2CEC\u2CEE\u2CF3\u2D27\u2D2D\uA661\uA699\uA69B\uA791\uA793-\uA794\uA797\uA799\uA79B\uA79D\uA79F\uA7A1\uA7A3\uA7A5\uA7A7\uA7A9\uA7B5\uA7B7\uA7B9\uA7BB\uA7BD\uA7BF\uA7C1\uA7C3\uA7C8\uA7CA\uA7D1\uA7D7\uA7D9\uA7F6\uAB53\uAB70-\uABBF]'
+}
+
+function Assert-EeaNewAppName {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    if ($PSVersionTable.PSEdition -ceq 'Core' -and (Test-EeaEditionSpecificName $Name)) {
+        throw 'This name contains letters that Windows PowerShell 5.1 and PowerShell 7 save differently, so the installed Easy Edge Apps could not read it. Choose another name, or add this website using Windows PowerShell 5.1.'
+    }
+}
+
 function ConvertTo-EeaWebsite {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value, [switch]$AllowMissingScheme)
@@ -1794,7 +1811,7 @@ function Read-EeaShortcut {
     try {
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($Path)
-        return [pscustomobject]@{
+        $result = [pscustomobject]@{
             TargetPath = $shortcut.TargetPath
             Arguments = $shortcut.Arguments
             Description = $shortcut.Description
@@ -1807,6 +1824,118 @@ function Read-EeaShortcut {
         if ($null -ne $shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) }
         if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
     }
+    # WScript.Shell silently loads an empty shortcut when the path has characters outside the Windows ANSI code page.
+    if (-not $result.TargetPath -and -not $result.Description -and $Path -cmatch '[^\u0000-\u007F]') {
+        $unicodeShortcut = (Initialize-EeaShortcutReader)::Read([IO.Path]::GetFullPath($Path))
+        $result = [pscustomobject]@{
+            TargetPath = $unicodeShortcut.TargetPath
+            Arguments = $unicodeShortcut.Arguments
+            Description = $unicodeShortcut.Description
+            IconLocation = $unicodeShortcut.IconLocation
+            WorkingDirectory = $unicodeShortcut.WorkingDirectory
+            WindowStyle = $unicodeShortcut.WindowStyle
+        }
+    }
+    return $result
+}
+
+function Initialize-EeaShortcutReader {
+    $source = @'
+namespace EasyEdgeApps.Shortcuts
+{
+    using System;
+    using System.Globalization;
+    using System.Runtime.InteropServices;
+    using System.Text;
+
+    public sealed class ShortcutData
+    {
+        public string TargetPath;
+        public string Arguments;
+        public string Description;
+        public string IconLocation;
+        public string WorkingDirectory;
+        public int WindowStyle;
+    }
+
+    public static class Reader
+    {
+        [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellLinkW
+        {
+            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int maximum, IntPtr findData, uint flags);
+            void GetIDList(out IntPtr idList);
+            void SetIDList(IntPtr idList);
+            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int maximum);
+            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder directory, int maximum);
+            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string directory);
+            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder arguments, int maximum);
+            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string arguments);
+            void GetHotkey(out ushort hotkey);
+            void SetHotkey(ushort hotkey);
+            void GetShowCmd(out int showCommand);
+            void SetShowCmd(int showCommand);
+            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder iconPath, int maximum, out int iconIndex);
+            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string iconPath, int iconIndex);
+            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string relativePath, uint reserved);
+            void Resolve(IntPtr window, uint flags);
+            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+        }
+
+        [ComImport, Guid("0000010b-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IPersistFile
+        {
+            void GetClassID(out Guid classId);
+            [PreserveSig] int IsDirty();
+            void Load([MarshalAs(UnmanagedType.LPWStr)] string fileName, uint mode);
+            void Save([MarshalAs(UnmanagedType.LPWStr)] string fileName, [MarshalAs(UnmanagedType.Bool)] bool remember);
+            void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string fileName);
+            void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string fileName);
+        }
+
+        [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+        private class ShellLink { }
+
+        public static ShortcutData Read(string path)
+        {
+            object link = new ShellLink();
+            try
+            {
+                ((IPersistFile)link).Load(path, 0);
+                IShellLinkW shellLink = (IShellLinkW)link;
+                ShortcutData data = new ShortcutData();
+                StringBuilder buffer = new StringBuilder(32768);
+                shellLink.GetPath(buffer, buffer.Capacity, IntPtr.Zero, 0);
+                data.TargetPath = buffer.ToString();
+                buffer.Length = 0;
+                shellLink.GetArguments(buffer, buffer.Capacity);
+                data.Arguments = buffer.ToString();
+                buffer.Length = 0;
+                shellLink.GetDescription(buffer, buffer.Capacity);
+                data.Description = buffer.ToString();
+                buffer.Length = 0;
+                shellLink.GetWorkingDirectory(buffer, buffer.Capacity);
+                data.WorkingDirectory = buffer.ToString();
+                buffer.Length = 0;
+                int iconIndex;
+                shellLink.GetIconLocation(buffer, buffer.Capacity, out iconIndex);
+                data.IconLocation = buffer.ToString() + "," + iconIndex.ToString(CultureInfo.InvariantCulture);
+                int showCommand;
+                shellLink.GetShowCmd(out showCommand);
+                data.WindowStyle = showCommand;
+                return data;
+            }
+            finally { Marshal.ReleaseComObject(link); }
+        }
+    }
+}
+'@
+    $sourceHash = (Get-EeaByteHash ([Text.Encoding]::UTF8.GetBytes($source))).Substring(0, 16)
+    $namespace = 'EasyEdgeApps.Shortcuts_' + $sourceHash
+    $typeName = $namespace + '.Reader'
+    if ($null -eq ($typeName -as [type])) { Add-Type -TypeDefinition $source.Replace('namespace EasyEdgeApps.Shortcuts', ('namespace ' + $namespace)) }
+    return $typeName -as [type]
 }
 
 function Get-EeaContext {
@@ -1882,7 +2011,9 @@ function Get-EeaSettings {
     $settingsPath = Join-Path $Context.Root 'settings.json'
     Assert-EeaSafePath $settingsPath
     if (-not [IO.File]::Exists($settingsPath)) { return New-EeaSettings }
-    if ((Get-Item -LiteralPath $settingsPath -Force).Length -gt 16384) { throw 'The application settings file is too large.' }
+    $settingsLength = (Get-Item -LiteralPath $settingsPath -Force).Length
+    if ($settingsLength -gt 16384) { throw 'The application settings file is too large.' }
+    if ($settingsLength -eq 0) { throw "The application settings file is empty or damaged. Nothing was changed. Ask your helper to restore or remove settings.json in $($Context.Root)." }
     return ConvertTo-EeaSettings (ConvertFrom-EeaJson ([IO.File]::ReadAllText($settingsPath, [Text.Encoding]::UTF8)))
 }
 
@@ -2036,9 +2167,34 @@ function Assert-EeaReady {
         Assert-EeaSafePath $pendingPath
         $completionPath = Join-Path $pendingPath 'complete.txt'
         if (-not [IO.File]::Exists($completionPath) -or [IO.File]::ReadAllText($completionPath) -cne 'EasyEdgeApps:complete:1') {
+            if (Test-EeaChangeInProgress) { throw 'Another Easy Edge Apps change is in progress. Please try again when it has finished.' }
             throw "An earlier change needs recovery. Nothing was changed. Ask your helper to check $($Context.Root)\.pending and the README recovery section."
         }
     }
+}
+
+function Get-EeaMutexName {
+    [CmdletBinding()]
+    param()
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { return 'Local\EasyEdgeApps-' + $identity.User.Value }
+    finally { $identity.Dispose() }
+}
+
+function Test-EeaChangeInProgress {
+    [CmdletBinding()]
+    param()
+
+    $mutex = New-Object Threading.Mutex($false, (Get-EeaMutexName))
+    try {
+        $acquired = $false
+        try { $acquired = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $acquired = $true }
+        if ($acquired) { $mutex.ReleaseMutex() }
+        return -not $acquired
+    }
+    finally { $mutex.Dispose() }
 }
 
 function Read-EeaEdgeJson {
@@ -2110,12 +2266,12 @@ function ConvertTo-EeaFavoriteName {
     $candidate = [regex]::Replace($Title.Normalize([Text.NormalizationForm]::FormC), '[<>:"/\\|?*\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', ' ')
     $candidate = [regex]::Replace($candidate, '\s+', ' ').Trim().TrimEnd('.').Trim()
     if (-not $candidate) { $candidate = ([Uri]$Website).IdnHost }
+    if ($candidate -match '^(CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(\..*)?$') { $candidate = 'Website ' + $candidate }
     if ($candidate.Length -gt 60) {
         $candidate = $candidate.Substring(0, 60)
         if ([char]::IsHighSurrogate($candidate[$candidate.Length - 1])) { $candidate = $candidate.Substring(0, $candidate.Length - 1) }
         $candidate = $candidate.Trim().TrimEnd('.').Trim()
     }
-    if ($candidate -match '^(CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(\..*)?$') { $candidate = 'Website ' + $candidate }
     return ConvertTo-EeaName $candidate
 }
 
@@ -2307,6 +2463,7 @@ function Get-EeaApps {
         $manifestPath = Join-Path $directory.FullName 'app.json'
         Assert-EeaSafePath $manifestPath
         if (-not [IO.File]::Exists($manifestPath)) { continue }
+        $summary = $null
         try {
             if ((Get-Item -LiteralPath $manifestPath -Force).Length -gt 32768) { throw 'Settings are too large.' }
             $summary = ConvertFrom-EeaJson ([IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8))
@@ -2316,6 +2473,10 @@ function Get-EeaApps {
             Read-EeaManifest $Context $summary.Name
         }
         catch {
+            if ($null -ne $summary -and $null -ne $summary.PSObject.Properties['Name'] -and $null -ne $summary.PSObject.Properties['Id'] -and
+                $summary.Name -is [string] -and $summary.Id -ceq $directory.Name -and (Test-EeaEditionSpecificName $summary.Name)) {
+                throw 'A saved website was created by a different PowerShell edition and cannot be read here. Nothing was changed. Use the edition that created it; the installed Easy Edge Apps uses Windows PowerShell 5.1.'
+            }
             throw 'A saved website has damaged settings. Nothing was changed; ask your helper to check the Apps folder in EasyEdgeApps.'
         }
     }
@@ -2780,39 +2941,44 @@ function Get-EeaWebsiteIconCandidates {
     $attributePattern = '(?:^|\s+)(?<name>[^\s"''<>/=]+)(?:\s*=\s*(?:"(?<value>[^"]*)"|''(?<value>[^'']*)''|(?<value>[^\s"''=<>`]+)))?'
     $options = [Text.RegularExpressions.RegexOptions]'IgnoreCase, Singleline, CultureInvariant'
     $timeout = [TimeSpan]::FromMilliseconds(250)
-    $tag = [regex]::Match($Html, $tagPattern, $options, $timeout)
     $links = New-Object 'Collections.Generic.List[string]'
     $baseAddress = $pageAddress
     $baseFound = $false
     $tagCount = 0
-    while ($tag.Success -and $tagCount -lt 128) {
-        $tagCount++
-        if ($tag.Groups['kind'].Success) {
-            $attributes = @{}
-            foreach ($attribute in [regex]::Matches($tag.Groups['attributes'].Value, $attributePattern, $options, $timeout)) {
-                $key = $attribute.Groups['name'].Value
-                if (-not $attributes.ContainsKey($key)) { $attributes[$key] = [Net.WebUtility]::HtmlDecode($attribute.Groups['value'].Value) }
-            }
-            if ($attributes.ContainsKey('href')) {
-                $href = $attributes['href'].Trim()
-                if ($tag.Groups['kind'].Value -ieq 'base' -and -not $baseFound) {
-                    $baseFound = $true
-                    try {
-                        $baseAddress = [uri](ConvertTo-EeaWebsite (New-Object Uri($pageAddress, $href)).AbsoluteUri)
-                        if ($pageAddress.Scheme -ceq 'https' -and $baseAddress.Scheme -cne 'https') { throw 'An HTTPS page cannot use an insecure icon base address.' }
-                    }
-                    catch { $baseAddress = $pageAddress }
+    try {
+        $tag = [regex]::Match($Html, $tagPattern, $options, $timeout)
+        while ($tag.Success -and $tagCount -lt 128) {
+            $tagCount++
+            if ($tag.Groups['kind'].Success) {
+                $attributes = @{}
+                foreach ($attribute in [regex]::Matches($tag.Groups['attributes'].Value, $attributePattern, $options, $timeout)) {
+                    $key = $attribute.Groups['name'].Value
+                    if (-not $attributes.ContainsKey($key)) { $attributes[$key] = [Net.WebUtility]::HtmlDecode($attribute.Groups['value'].Value) }
                 }
-                elseif ($tag.Groups['kind'].Value -ieq 'link' -and $attributes.ContainsKey('rel')) {
-                    $relations = $attributes['rel'] -split '\s+'
-                    if (($relations -contains 'icon' -or $relations -contains 'apple-touch-icon' -or $relations -contains 'apple-touch-icon-precomposed') -and
-                        $href -notmatch '[\p{Cc}\p{Cf}\\]') {
-                        $links.Add($href)
+                if ($attributes.ContainsKey('href')) {
+                    $href = $attributes['href'].Trim()
+                    if ($tag.Groups['kind'].Value -ieq 'base' -and -not $baseFound) {
+                        $baseFound = $true
+                        try {
+                            $baseAddress = [uri](ConvertTo-EeaWebsite (New-Object Uri($pageAddress, $href)).AbsoluteUri)
+                            if ($pageAddress.Scheme -ceq 'https' -and $baseAddress.Scheme -cne 'https') { throw 'An HTTPS page cannot use an insecure icon base address.' }
+                        }
+                        catch { $baseAddress = $pageAddress }
+                    }
+                    elseif ($tag.Groups['kind'].Value -ieq 'link' -and $attributes.ContainsKey('rel')) {
+                        $relations = $attributes['rel'] -split '\s+'
+                        if (($relations -contains 'icon' -or $relations -contains 'apple-touch-icon' -or $relations -contains 'apple-touch-icon-precomposed') -and
+                            $href -notmatch '[\p{Cc}\p{Cf}\\]') {
+                            $links.Add($href)
+                        }
                     }
                 }
             }
+            $tag = $tag.NextMatch()
         }
-        $tag = $tag.NextMatch()
+    }
+    catch [Text.RegularExpressions.RegexMatchTimeoutException] {
+        # Pathological markup stops discovery early; declared icons found so far and /favicon.ico are still tried.
     }
     $seen = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $candidates = New-Object 'Collections.Generic.List[string]'
@@ -3206,12 +3372,67 @@ function Write-EeaAtomicFile {
     $siblingPath = Join-Path ([IO.Path]::GetDirectoryName($Destination)) ('.EasyEdgeApps.' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
         [IO.File]::Copy($Source, $siblingPath, $false)
-        if ([IO.File]::Exists($Destination)) { [IO.File]::Replace($siblingPath, $Destination, [System.Management.Automation.Language.NullString]::Value) }
-        else { [IO.File]::Move($siblingPath, $Destination) }
+        if (-not [IO.File]::Exists($Destination)) {
+            [IO.File]::Move($siblingPath, $Destination)
+            return
+        }
+        $originalHash = Get-EeaByteHash ([IO.File]::ReadAllBytes($Destination))
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                [IO.File]::Replace($siblingPath, $Destination, [System.Management.Automation.Language.NullString]::Value)
+                return
+            }
+            catch [IO.IOException] {
+                # Security scanners, search indexing, and File Explorer can hold a shortcut or icon open for a moment.
+                $failure = $_.Exception
+                while ($failure -isnot [IO.IOException] -and $null -ne $failure.InnerException) { $failure = $failure.InnerException }
+                if (($failure.HResult -band 0xFFFF) -notin @(32, 33, 1175) -or $attempt -ge 15 -or -not [IO.File]::Exists($siblingPath)) { throw }
+            }
+            Start-Sleep -Milliseconds 50
+            if ((Get-EeaByteHash ([IO.File]::ReadAllBytes($Destination))) -cne $originalHash) {
+                throw 'A file was changed outside Easy Edge Apps while it was being replaced. It was left unchanged.'
+            }
+        }
     }
     finally {
         if ([IO.File]::Exists($siblingPath)) { [IO.File]::Delete($siblingPath) }
     }
+}
+
+function Remove-EeaCompletedPending {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$PendingPath)
+
+    Assert-EeaSafePath $PendingPath
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        try {
+            [IO.Directory]::Delete($PendingPath, $true)
+            return $true
+        }
+        catch [IO.IOException], [UnauthorizedAccessException] {
+            if (-not [IO.Directory]::Exists($PendingPath)) { return $true }
+        }
+        # Copies of read-only files are the usual reason an unlocked completed change cannot be removed.
+        foreach ($folder in @($PendingPath, (Join-Path $PendingPath 'staged'))) {
+            try {
+                if ([IO.Directory]::Exists($folder)) {
+                    foreach ($file in [IO.Directory]::GetFiles($folder)) {
+                        $attributes = [IO.File]::GetAttributes($file)
+                        if (($attributes -band [IO.FileAttributes]::ReadOnly) -and -not ($attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                            [IO.File]::SetAttributes($file, ($attributes -band -bnot [IO.FileAttributes]::ReadOnly))
+                        }
+                    }
+                }
+            }
+            catch [IO.IOException], [UnauthorizedAccessException] { }
+        }
+    }
+    # A failed recursive delete can remove the completion marker before stopping, so restore the proof that this change finished.
+    if ([IO.Directory]::Exists($PendingPath)) {
+        try { [IO.File]::WriteAllText((Join-Path $PendingPath 'complete.txt'), 'EasyEdgeApps:complete:1', [Text.Encoding]::ASCII) }
+        catch [IO.IOException], [UnauthorizedAccessException] { }
+    }
+    return $false
 }
 
 function Invoke-EeaTransaction {
@@ -3220,14 +3441,50 @@ function Invoke-EeaTransaction {
 
     Assert-EeaReady $Context
     $pendingPath = Join-Path $Context.Root '.pending'
-    if ([IO.Directory]::Exists($pendingPath)) {
-        try { [IO.Directory]::Delete($pendingPath, $true) }
-        catch { throw 'Windows is still using temporary files from the last completed change. Your saved websites are safe. Please try the change again later.' }
+    if ([IO.Directory]::Exists($pendingPath) -and -not (Remove-EeaCompletedPending $pendingPath)) {
+        throw 'Windows is still using temporary files from the last completed change. Your saved websites are safe. Please try the change again later.'
     }
     [void][IO.Directory]::CreateDirectory($pendingPath)
     $appliedSteps = New-Object 'Collections.Generic.List[object]'
     $createdDirectories = New-Object 'Collections.Generic.List[string]'
     $keepRecovery = $false
+    $applyStarted = $false
+    $outcomeKnown = $false
+    $currentEntry = $null
+    $undoChanges = {
+        for ($stepIndex = $appliedSteps.Count - 1; $stepIndex -ge 0; $stepIndex--) {
+            $entry = $appliedSteps[$stepIndex]
+            try {
+                if ($entry.Existed) { Write-EeaAtomicFile $entry.Backup $entry.Path }
+                else { [IO.File]::Delete($entry.Path) }
+            }
+            catch { $keepRecovery = $true }
+        }
+        $appliedSteps.Clear()
+        if ($null -ne $currentEntry) {
+            # The interrupted step may already have replaced or removed its file; only undo what provably came from this change.
+            $entry = $currentEntry
+            try {
+                $stagedHash = if ($null -ne $entry.Source -and [IO.File]::Exists($entry.Source)) { Get-EeaByteHash ([IO.File]::ReadAllBytes($entry.Source)) } else { $null }
+                $currentHash = if ([IO.File]::Exists($entry.Path)) { Get-EeaByteHash ([IO.File]::ReadAllBytes($entry.Path)) } else { $null }
+                if ($entry.Existed) {
+                    if ($null -eq $currentHash -or ($null -ne $stagedHash -and $currentHash -ceq $stagedHash)) { Write-EeaAtomicFile $entry.Backup $entry.Path }
+                }
+                elseif ($null -ne $currentHash -and $currentHash -ceq $stagedHash) { [IO.File]::Delete($entry.Path) }
+                $currentEntry = $null
+            }
+            catch { $keepRecovery = $true }
+        }
+        foreach ($directory in $createdDirectories) {
+            try {
+                if ([IO.Directory]::Exists($directory) -and [IO.Directory]::GetFileSystemEntries($directory).Length -eq 0) {
+                    [IO.Directory]::Delete($directory, $false)
+                }
+            }
+            catch [IO.IOException], [UnauthorizedAccessException] { }
+        }
+        $createdDirectories.Clear()
+    }
     try {
         $stagePath = Join-Path $pendingPath 'staged'
         [void][IO.Directory]::CreateDirectory($stagePath)
@@ -3238,12 +3495,17 @@ function Invoke-EeaTransaction {
             if ([IO.Directory]::Exists($step.Path)) { throw 'A folder is using a file location needed for this website.' }
             $backupPath = Join-Path $pendingPath ($journal.Count.ToString() + '.backup')
             $existed = [IO.File]::Exists($step.Path)
-            if ($existed) { [IO.File]::Copy($step.Path, $backupPath, $false) }
+            if ($existed) {
+                [IO.File]::Copy($step.Path, $backupPath, $false)
+                [IO.File]::SetAttributes($backupPath, [IO.FileAttributes]::Normal)
+            }
             $journal.Add([pscustomobject]@{ Path = $step.Path; Source = $step.Source; Existed = $existed; Backup = $backupPath })
         }
         $journalJson = ConvertTo-Json -InputObject @($journal.ToArray()) -Depth 5
         [IO.File]::WriteAllText((Join-Path $pendingPath 'journal.json'), $journalJson, (New-Object Text.UTF8Encoding($false)))
+        $applyStarted = $true
         foreach ($entry in $journal) {
+            $currentEntry = $entry
             $parentDirectory = [IO.Path]::GetDirectoryName($entry.Path)
             if (-not [IO.Directory]::Exists($parentDirectory)) {
                 [void][IO.Directory]::CreateDirectory($parentDirectory)
@@ -3252,29 +3514,25 @@ function Invoke-EeaTransaction {
             if ($null -ne $entry.Source) { Write-EeaAtomicFile $entry.Source $entry.Path }
             elseif ($entry.Existed) { [IO.File]::Delete($entry.Path) }
             $appliedSteps.Add($entry)
+            $currentEntry = $null
         }
+        $outcomeKnown = $true
     }
     catch {
         $originalError = $_
-        for ($stepIndex = $appliedSteps.Count - 1; $stepIndex -ge 0; $stepIndex--) {
-            $entry = $appliedSteps[$stepIndex]
-            try {
-                if ($entry.Existed) { Write-EeaAtomicFile $entry.Backup $entry.Path }
-                else { [IO.File]::Delete($entry.Path) }
-            }
-            catch { $keepRecovery = $true }
-        }
-        foreach ($directory in $createdDirectories) {
-            if ([IO.Directory]::Exists($directory) -and [IO.Directory]::GetFileSystemEntries($directory).Length -eq 0) {
-                [IO.Directory]::Delete($directory, $false)
-            }
-        }
+        . $undoChanges
+        $outcomeKnown = $true
         if ($keepRecovery) {
             throw "The change could not finish or be fully undone. Recovery copies are in $pendingPath. Ask your helper to check them before trying again."
         }
         throw $originalError
     }
     finally {
+        if ($applyStarted -and -not $outcomeKnown) {
+            # Stopping the command (for example with Ctrl+C) skips catch but still runs finally.
+            try { . $undoChanges }
+            catch { $keepRecovery = $true }
+        }
         if (-not $keepRecovery -and [IO.Directory]::Exists($pendingPath)) {
             Assert-EeaSafePath $pendingPath
             try { [IO.Directory]::Delete($pendingPath, $true) }
@@ -3292,10 +3550,7 @@ function Invoke-EeaLocked {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][scriptblock]$Operation)
 
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    try { $mutexName = 'Local\EasyEdgeApps-' + $identity.User.Value }
-    finally { $identity.Dispose() }
-    $mutex = New-Object Threading.Mutex($false, $mutexName)
+    $mutex = New-Object Threading.Mutex($false, (Get-EeaMutexName))
     $acquired = $false
     try {
         try { $acquired = $mutex.WaitOne(0) }
@@ -3364,6 +3619,7 @@ function Install-EeaApp {
     Invoke-EeaLocked {
         Assert-EeaReady $Context
         $previousState = Read-EeaManifest $Context $cleanName
+        if ($null -eq $previousState) { Assert-EeaNewAppName $cleanName }
         Assert-EeaOwnership -Paths $paths -State $previousState -Desktop $Desktop -StartMenu $StartMenu
         $savedNotes = if ($notesProvided) { $Notes } elseif ($null -ne $previousState -and $null -ne $previousState.PSObject.Properties['Notes']) { $previousState.Notes } else { '' }
         $savedProfile = if ($profileProvided) { $EdgeProfile } elseif ($null -ne $previousState) { Get-EeaStateProfile $previousState } else { (Get-EeaSettings -Context $Context).DefaultEdgeProfile }
@@ -3385,6 +3641,7 @@ function Install-EeaApp {
             if ($null -ne $iconBytes) { [IO.File]::WriteAllBytes($stagedIcon, $iconBytes); $iconKind = 'Custom' }
             elseif (-not $GenerateIcon -and $null -ne $previousState -and [IO.File]::Exists($paths.Icon)) {
                 [IO.File]::Copy($paths.Icon, $stagedIcon)
+                [IO.File]::SetAttributes($stagedIcon, [IO.FileAttributes]::Normal)
                 $iconKind = if ($null -ne $previousState.PSObject.Properties['IconKind']) { $previousState.IconKind } else { 'Custom' }
             }
             else { New-EeaIcon -Path $stagedIcon -AppName $cleanName }
@@ -3662,6 +3919,8 @@ function New-EeaKit {
         }
         $apps = @($apps | Where-Object { $selectedIds -ccontains $_.Id })
     }
+    if ($apps.Count -eq 0) { throw 'No saved websites are available to export.' }
+    if ($apps.Count -gt 100) { throw 'Up to 100 websites fit in one App Kit. Choose up to 100 websites with -AppNames and export again.' }
     $portableApps = @($apps | ForEach-Object { ConvertTo-EeaKitApp -State $_ -Context $Context })
     $schemaVersion = if (@($portableApps | Where-Object { Get-EeaStateFreshSession $_ }).Count -gt 0) { 2 } else { 1 }
     return ConvertTo-EeaKit ([pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = $schemaVersion; Name = $KitName; Notes = $Notes; Apps = $portableApps })
@@ -3683,13 +3942,17 @@ function Get-EeaChecks {
 
     $missingSettingsIssue = 'App settings are missing. This folder may contain retained data; removal intent is unknown. No repair or deletion was performed.'
     try { Assert-EeaReady $Context }
-    catch { return [pscustomobject]@{ Name = 'Setup recovery'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($_.Exception.Message); State = $null; BrowsingMode = 'Unknown' } }
+    catch { return [pscustomobject]@{ Name = 'Setup recovery'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($_.Exception.Message); State = $null; Snapshot = ''; BrowsingMode = 'Unknown' } }
     $edgePath = $null
     $edgeIssue = ''
     try { $edgePath = Find-EeaEdge } catch { $edgeIssue = $_.Exception.Message }
     $entries = New-Object 'Collections.Generic.List[object]'
     if ($AppNames) {
-        foreach ($appName in $AppNames) { $entries.Add([pscustomobject]@{ Name = (ConvertTo-EeaName $appName); Id = (Get-EeaId $appName); Invalid = $false; Missing = $false }) }
+        $selectedIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($appName in $AppNames) {
+            $appId = Get-EeaId $appName
+            if ($selectedIds.Add($appId)) { $entries.Add([pscustomobject]@{ Name = (ConvertTo-EeaName $appName); Id = $appId; Invalid = $false; Missing = $false }) }
+        }
     }
     else {
         $appsRoot = Join-Path $Context.Root 'Apps'
@@ -3714,10 +3977,10 @@ function Get-EeaChecks {
                 }
             }
         }
-        catch { return [pscustomobject]@{ Name = 'Saved apps'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @('The saved apps folder cannot be safely read.'); State = $null; BrowsingMode = 'Unknown' } }
+        catch { return [pscustomobject]@{ Name = 'Saved apps'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @('The saved apps folder cannot be safely read.'); State = $null; Snapshot = ''; BrowsingMode = 'Unknown' } }
     }
     if ($entries.Count -eq 0 -and $edgeIssue) {
-        return [pscustomobject]@{ Name = 'Microsoft Edge'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($edgeIssue); State = $null; BrowsingMode = 'Unknown' }
+        return [pscustomobject]@{ Name = 'Microsoft Edge'; Id = ''; Status = 'Blocked'; CanRepair = $false; Issues = @($edgeIssue); State = $null; Snapshot = ''; BrowsingMode = 'Unknown' }
     }
     foreach ($entry in $entries) {
         $issues = New-Object 'Collections.Generic.List[string]'
@@ -3796,12 +4059,14 @@ function Get-EeaKitPreview {
             $paths = Get-EeaPaths $Context $app.Name
             $state = Read-EeaManifest $Context $app.Name
             if ($null -ne $state) { $currentBrowsingMode = Get-EeaBrowsingMode $state }
+            else { Assert-EeaNewAppName $app.Name }
             Assert-EeaOwnership -Paths $paths -State $state -Desktop $app.Desktop -StartMenu $app.StartMenu
             if ($null -ne $state) {
                 if ($NewOnly) { throw 'A website with this name is now saved. Refresh Favorites before adding it.' }
                 if ((Get-EeaStateTaskbar $state) -and -not $app.StartMenu) { throw 'This taskbar app requires its Start menu entry. Clear Taskbar in setup before importing a kit without that entry.' }
                 $currentUrl = $state.Url
                 $domainChanged = -not [StringComparer]::OrdinalIgnoreCase.Equals(([Uri]$state.Url).IdnHost, ([Uri]$app.Url).IdnHost)
+                $connectionChanged = ([Uri]$state.Url).Scheme -cne ([Uri]$app.Url).Scheme -or ([Uri]$state.Url).Port -ne ([Uri]$app.Url).Port
                 $check = Get-EeaChecks -AppNames @($state.Name) -Context $Context
                 if ($check.Status -in @('Conflict', 'Blocked')) { throw ($check.Issues -join ' ') }
                 $oldNotes = if ($null -ne $state.PSObject.Properties['Notes']) { $state.Notes } else { '' }
@@ -3810,6 +4075,7 @@ function Get-EeaKitPreview {
                 $sameSession = $validated.SchemaVersion -eq 1 -or (Get-EeaStateFreshSession $state) -eq (Get-EeaStateFreshSession $app)
                 $action = 'Update'
                 $detail = if ($domainChanged) { 'DESTINATION DOMAIN CHANGES. Review both addresses before approving.' }
+                    elseif ($connectionChanged) { 'CONNECTION CHANGES from ' + ([Uri]$state.Url).Scheme.ToUpperInvariant() + ' to ' + ([Uri]$app.Url).Scheme.ToUpperInvariant() + ' or to another port. Review both addresses before approving.' }
                     elseif ($state.Url -cne $app.Url) { 'Website address changes. Review both addresses before approving.' }
                     else { 'Update notes, icon, placement, or missing owned files.' }
                 if ($state.Url -ceq $app.Url -and $state.Desktop -eq $app.Desktop -and $state.StartMenu -eq $app.StartMenu -and
@@ -5316,7 +5582,7 @@ function Complete-EeaWebsiteIconLookup {
         $ui.CancelIconButton.Enabled = $false
         $ui.SaveButton.Enabled = $null -eq $ui.PinProcess
     }
-    if ($ui.CloseAfterIconLookup) { $Form.Close() }
+    if ($ui.CloseAfterIconLookup) { $ui.CloseAfterIconLookup = $false; $Form.Close() }
     elseif ($resumeSave) { $ui.SaveButton.PerformClick() }
 }
 
@@ -5367,7 +5633,7 @@ function Complete-EeaTaskbarPin {
             $ui.PinProcess = $null
             $ui.PinTimer.Stop()
             Update-EeaPinControls $Form
-            if ($ui.CloseAfterPinRequest) { $Form.Close() }
+            if ($ui.CloseAfterPinRequest) { $ui.CloseAfterPinRequest = $false; $Form.Close() }
         }
     }
 }
@@ -5571,7 +5837,7 @@ function Complete-EeaFormUpdateCheck {
         Write-EeaDebugLog -Event UpdateCheck -Outcome $outcome -ErrorType $errorType -Settings $ui.Settings -Context $ui.Context
     }
     if ($null -eq $ui.IconRequest) { $ui.StatusLabel.Text = $ui.UpdateStatus }
-    if ($ui.CloseAfterUpdateCheck) { $Form.Close() }
+    if ($ui.CloseAfterUpdateCheck) { $ui.CloseAfterUpdateCheck = $false; $Form.Close() }
 }
 
 function Open-EeaUpdateRelease {
@@ -5653,9 +5919,11 @@ function Set-EeaFormPreferences {
             finally { if ($null -ne $previousFont) { $previousFont.Dispose() } }
         }
         $ui.SettingsMenu.Font = $Form.Font
-        if ($ui.AppList.SelectedIndex -lt 0) {
+        # Only a clean new editor follows changed placement defaults; a draft keeps the placement the helper chose.
+        if ($ui.AppList.SelectedIndex -lt 0 -and $null -ne $ui.EditorBaseline -and (Get-EeaEditorSnapshot $Form) -ceq $ui.EditorBaseline) {
             $ui.DesktopCheck.Checked = $ui.Settings.DefaultDesktop
             $ui.StartMenuCheck.Checked = $ui.TaskbarCheck.Checked -or $ui.Settings.DefaultStartMenu
+            $ui.EditorBaseline = Get-EeaEditorSnapshot $Form
         }
     }
     finally { $ui.UpdatingSettings = $false }
@@ -5803,6 +6071,7 @@ function New-EeaSetupForm {
     $appList.TabIndex = 1
     $listPanel.Controls.Add($appList, 0, 1)
     $newButton = New-EeaButton '&New' -Icon Add -AccessibleName 'New website'
+    $newButton.AccessibleDescription = 'Keyboard shortcut: Ctrl+N'
     $newButton.TabIndex = 2
     $listPanel.Controls.Add($newButton, 0, 2)
     $content.Controls.Add($listPanel, 0, 0)
@@ -5842,7 +6111,8 @@ function New-EeaSetupForm {
     $urlInput = New-EeaTextBox
     $urlInput.Dock = [Windows.Forms.DockStyle]::Top
     $urlInput.MaxLength = 2048
-    $urlInput.AccessibleName = 'Website address starting with https'
+    $urlInput.AccessibleName = 'Website address'
+    $urlInput.AccessibleDescription = 'Enter a website such as example.com/news or a full https:// or http:// address. HTTPS is tried first. Do not include passwords, reset links, or sign-in codes.'
     $urlInput.TabIndex = 3
     $urlInput.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 14)
     $editor.Controls.Add($urlInput, 0, 3)
@@ -5893,6 +6163,7 @@ function New-EeaSetupForm {
         if ($null -eq $ownerForm -or $null -eq $ownerForm.Tag) { return }
         if ($Sender.Checked) { $ownerForm.Tag.StartMenuCheck.Checked = $true }
         $ownerForm.Tag.StartMenuCheck.Enabled = -not $Sender.Checked
+        $Sender.Enabled = $ownerForm.Tag.TaskbarSupported -or $Sender.Checked
         Update-EeaWindowControls $ownerForm
     })
     $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck, $taskbarCheck))
@@ -5981,6 +6252,7 @@ function New-EeaSetupForm {
     $iconPanel.Controls.AddRange([Windows.Forms.Control[]]@($iconPreview, $activitySpinner, $getIconButton, $cancelIconButton, $iconButton, $clearIconButton))
     $editor.Controls.Add($iconPanel, 0, 9)
     $iconLabel = New-EeaLabel -Icon Image
+    $iconLabel.UseMnemonic = $false
     $iconLabel.AutoSize = $true
     $iconLabel.Text = 'Automatic'
     $iconLabel.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 16)
@@ -5991,6 +6263,7 @@ function New-EeaSetupForm {
     $actions.Dock = [Windows.Forms.DockStyle]::Top
     $actions.TabIndex = 9
     $saveButton = New-EeaButton '&Add website' -Icon Add
+    $saveButton.AccessibleDescription = 'Keyboard shortcut: Ctrl+S'
     Set-EeaPrimaryButton $saveButton
     $openButton = New-EeaButton '&Open' -Icon Open
     $removeButton = New-EeaButton '&Remove...' -Icon Remove
@@ -6291,6 +6564,16 @@ function New-EeaSetupForm {
         }
         catch { Show-EeaFormError $ownerForm $_ }
     })
+    $form.KeyPreview = $true
+    $form.Add_KeyDown({
+        param($Sender, $EventArgs)
+        if (-not $EventArgs.Control -or $EventArgs.Alt -or $EventArgs.Shift) { return }
+        $shortcutButton = if ($EventArgs.KeyCode -eq [Windows.Forms.Keys]::S) { $Sender.Tag.SaveButton } elseif ($EventArgs.KeyCode -eq [Windows.Forms.Keys]::N) { $Sender.Tag.NewButton } else { $null }
+        if ($null -eq $shortcutButton) { return }
+        $EventArgs.Handled = $true
+        $EventArgs.SuppressKeyPress = $true
+        if ($shortcutButton.Enabled -and $shortcutButton.Visible) { $shortcutButton.PerformClick() }
+    })
     $form.Add_FormClosing({
         param($Sender, $EventArgs)
         if (-not (Confirm-EeaEditorDiscard $Sender -Closing)) {
@@ -6398,7 +6681,10 @@ function New-EeaSetupForm {
         })
     }
     try { Update-EeaForm $form }
-    catch { $statusLabel.Text = 'Saved settings need attention. Use Check Apps before making changes.' }
+    catch {
+        Reset-EeaEditor $form
+        $statusLabel.Text = 'Saved settings need attention. Use Check Apps before making changes.'
+    }
     return $form
 }
 
@@ -6604,7 +6890,7 @@ function New-EeaSettingsForm {
     $updatePanel.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $updateSpinner = New-Object ((Initialize-EeaSpaceBackground) + '.LoadingSpinner')
     $updateSpinner.Margin = New-Object Windows.Forms.Padding(0, 8, 8, 0)
-    $checkUpdates = New-EeaButton '&Check for updates' -Icon Refresh
+    $checkUpdates = New-EeaButton 'Check for &updates' -Icon Refresh
     $cancelUpdate = New-EeaButton '' -Icon Close -AccessibleName 'Cancel update check'
     $cancelUpdate.AutoSize = $false
     $cancelUpdate.Padding = New-Object Windows.Forms.Padding(0)
@@ -6614,7 +6900,7 @@ function New-EeaSettingsForm {
     $cancelUpdate.Enabled = $false
     $cancelUpdate.Visible = $false
     $cancelUpdate.Add_EnabledChanged({ param($Sender, $EventArgs) $Sender.Visible = $Sender.Enabled })
-    $downloadUpdate = New-EeaButton '&Download update' -Icon Import
+    $downloadUpdate = New-EeaButton 'Do&wnload update' -Icon Import
     $updatePanel.Controls.AddRange([Windows.Forms.Control[]]@($checkUpdates, $downloadUpdate, $cancelUpdate, $updateSpinner))
     $updateRow = New-EeaSettingsRow -Label ('Version ' + (Get-EeaVersion).ToString()) -Control $updatePanel -Icon Info
     $updateLabel = New-EeaLabel -Icon Info
@@ -6643,7 +6929,7 @@ function New-EeaSettingsForm {
     $desktopCheck = New-EeaCheckBox '&Desktop' -Icon Desktop
     $desktopCheck.Checked = $settings.DefaultDesktop
     $desktopCheck.Margin = New-Object Windows.Forms.Padding(0, 0, 16, 0)
-    $startMenuCheck = New-EeaCheckBox '&Start menu' -Icon Start
+    $startMenuCheck = New-EeaCheckBox 'Start &menu' -Icon Start
     $startMenuCheck.Checked = $settings.DefaultStartMenu
     $startMenuCheck.Margin = New-Object Windows.Forms.Padding(0)
     $placement = New-Object ((Initialize-EeaSpaceBackground) + '.SettingsFlowPanel')
@@ -6652,7 +6938,7 @@ function New-EeaSettingsForm {
     $placement.Controls.AddRange([Windows.Forms.Control[]]@($desktopCheck, $startMenuCheck))
     $placementRow = New-EeaSettingsRow -Label 'New shortcuts' -Control $placement -Icon Desktop
     Add-EeaSettingsSection -Form $form -Title 'Websites' -Icon Link -Controls @($profileRow, $placementRow)
-    $motionCheck = New-EeaCheckBox '&Animate the space background' -Icon Motion
+    $motionCheck = New-EeaCheckBox 'Animate the space &background' -Icon Motion
     $motionCheck.Checked = $settings.MotionEnabled
     $textSize = New-Object Windows.Forms.ComboBox
     $textSize.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
@@ -6661,7 +6947,7 @@ function New-EeaSettingsForm {
     $textSize.SelectedItem = $settings.TextSize
     $textSizeRow = New-EeaSettingsRow -Label '&Text size' -Control $textSize -Icon Name
     Add-EeaSettingsSection -Form $form -Title 'Appearance' -Icon Image -Controls @($motionCheck, $textSizeRow)
-    $debugCheck = New-EeaCheckBox 'Enable &debug logging' -Icon Notes
+    $debugCheck = New-EeaCheckBox 'Enable debug lo&gging' -Icon Notes
     $debugCheck.Checked = $settings.DebugLogging
     $logPanel = New-Object ((Initialize-EeaSpaceBackground) + '.SettingsFlowPanel')
     $logPanel.AutoSize = $true
@@ -7088,7 +7374,7 @@ function New-EeaSelectionForm {
             $selected = @($ui.Grid.Rows | Where-Object { $_.Tag.CanSelect -and [bool]$_.Cells[0].Value } | ForEach-Object { $_.Tag.Data })
             if ($selected.Count -lt 1 -or $selected.Count -gt 100) { throw 'Choose between 1 and 100 available websites.' }
             $message = switch ($ui.Mode) {
-                Favorites { 'Add the selected Favorites bar websites? Edge favorites stay unchanged. Shortcuts use Edge''s normal profile. Completed apps remain if a later app fails.' }
+                Favorites { 'Add the selected Favorites bar websites? Edge favorites stay unchanged. Each website gets its own separate Edge app profile; normal Edge sign-ins and cookies are not copied. Completed apps remain if a later app fails.' }
                 Import { 'Apply the selected App Kit changes? Review the old and new addresses, especially domain changes. Apps outside this selection stay unchanged. Completed apps remain if a later app fails.' }
                 Check { 'Repair the selected owned files? Missing custom icons become automatic letter icons. Website access, accounts, and sign-in will not be tested or repaired.' }
             }
@@ -7110,7 +7396,11 @@ function New-EeaSelectionForm {
             Set-EeaSelectionRows -Form $ownerForm -Rows $resultRows
             $ui.StatusLabel.Text = if ($ui.Result.Completed) { 'Shortcut changes completed. Website access was not tested.' } else { 'Some changes were not completed. Review each result; earlier completed apps remain.' }
         }
-        catch { Show-EeaFormError $ownerForm $_ }
+        catch {
+            $failure = $_
+            Update-EeaSelectionButtons $ownerForm
+            Show-EeaFormError $ownerForm $failure
+        }
         finally { $ownerForm.UseWaitCursor = $false }
     })
     try {
@@ -7142,6 +7432,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
         if ($env:OS -ne 'Windows_NT') { throw 'Easy Edge Apps needs Windows and Microsoft Edge.' }
         if (-not $PSBoundParameters.ContainsKey('Action') -and $Name -and $Url) { $Action = 'Install' }
+        elseif (-not $PSBoundParameters.ContainsKey('Action') -and ($Name -or $Url)) { throw 'Provide both -Name and -Url to add a website, or run without parameters for the setup window.' }
         $actionOptions = @{
             Setup = @('EdgeUserDataPath'); Install = @('Name', 'Url', 'IconPath', 'Notes', 'EdgeProfile', 'SessionMode', 'NoDesktop', 'NoStartMenu', 'Launch', 'ProfileMode', 'LaunchMode', 'AlwaysOnTop')
             List = @(); Remove = @('Name'); Open = @('Name')
@@ -7195,8 +7486,12 @@ if ($MyInvocation.InvocationName -ne '.') {
             'List' { Get-EeaApps | Select-Object Name, Url, Desktop, StartMenu }
             'Remove' {
                 if ([string]::IsNullOrWhiteSpace($Name)) { throw 'Provide -Name when using -Action Remove.' }
+                $removalManifest = (Get-EeaPaths (Get-EeaContext) $Name).Manifest
                 Remove-EeaApp -AppName $Name
-                if (-not $Quiet -and -not $WhatIfPreference) { Write-Host ('Removed managed shortcuts, if present: ' + $Name) }
+                if (-not $Quiet -and -not $WhatIfPreference) {
+                    if ([IO.File]::Exists($removalManifest)) { Write-Host ('No changes were made: ' + $Name) }
+                    else { Write-Host ('Removed managed shortcuts, if present: ' + $Name) }
+                }
             }
             'Open' {
                 if ([string]::IsNullOrWhiteSpace($Name)) { throw 'Provide -Name when using -Action Open.' }
@@ -7263,6 +7558,8 @@ if ($MyInvocation.InvocationName -ne '.') {
                         $favorites = @($favorites | Where-Object { $selectedIds -ccontains (Get-EeaId $_.Name) })
                     }
                     if ($favorites.Count -eq 0) { if (-not $Quiet) { Write-Host 'No new HTTPS favorites are available.' }; break }
+                    if ($NoDesktop -and $NoStartMenu) { throw 'Choose Desktop, Start menu, or both; do not combine -NoDesktop and -NoStartMenu.' }
+                    if ($favorites.Count -gt 100) { throw ('' + $favorites.Count + ' favorites are available, but up to 100 can be added at once. Choose up to 100 with -AppNames, then run again.') }
                     $kit = New-EeaFavoritesKit -Favorites $favorites -Desktop (-not $NoDesktop) -StartMenu (-not $NoStartMenu)
                     $kitPreview = @(Get-EeaKitPreview -Kit $kit -NewOnly)
                     if ($Preview) { $kitPreview | Select-Object Name, Action, Url, Detail }

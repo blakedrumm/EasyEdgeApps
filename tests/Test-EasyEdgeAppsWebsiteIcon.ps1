@@ -307,6 +307,8 @@ function Test-WebsiteIconLookup {
 '@
     $candidates = @(Get-EeaWebsiteIconCandidates -PageUri 'https://site.example/account/view' -Html $html)
     Assert-WebsiteIcon ($candidates.Count -eq 4 -and $candidates[0] -ceq 'https://site.example/assets/brand.png?rev=1&theme=light' -and $candidates[1] -ceq 'https://cdn.example/touch.png' -and $candidates[2] -ceq 'https://site.example/assets/vector' -and $candidates[3] -ceq 'https://site.example/favicon.ico') 'Declared raster and SVG icons must respect base URLs, HTML attributes and entities, while rejecting active, insecure, or credential-bearing URLs.'
+    $pathological = @(Get-EeaWebsiteIconCandidates -PageUri 'https://site.example/' -Html ('<link ' * 80000))
+    Assert-WebsiteIcon ($pathological.Count -eq 1 -and $pathological[0] -ceq 'https://site.example/favicon.ico') 'Markup that exceeds the matching time budget must still fall back to /favicon.ico.'
     $handler = New-Object EasyEdgeAppsWebsiteIconTests.Handler
     $client = New-Object Net.Http.HttpClient($handler)
     try {

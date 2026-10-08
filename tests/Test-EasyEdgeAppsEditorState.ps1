@@ -85,6 +85,18 @@ try {
     $form.Show()
     $ui = $form.Tag
     Assert-EditorMnemonics $form
+    $settingsForm = New-EeaSettingsForm -OwnerForm $form
+    try {
+        $settingsForm.StartPosition = [Windows.Forms.FormStartPosition]::Manual
+        $settingsForm.Location = New-Object Drawing.Point(-10000, -10000)
+        $settingsForm.ShowInTaskbar = $false
+        $settingsForm.Show()
+        Assert-EditorMnemonics $settingsForm
+        $settingsForm.Tag.DownloadUpdateButton.Enabled = $true
+        $settingsForm.Tag.DownloadUpdateButton.Visible = $true
+        Assert-EditorMnemonics $settingsForm
+    }
+    finally { $settingsForm.Dispose() }
     Assert-Editor ($ui.StatusLabel.AccessibilityObject.Role -eq [Windows.Forms.AccessibleRole]::StatusBar) 'Status feedback must expose a native status role.'
     Assert-Editor ($ui.ActivitySpinner.AccessibilityObject.Role -eq [Windows.Forms.AccessibleRole]::ProgressBar) 'Activity must expose its native accessibility object before observing changes.'
     $probe = New-Object EeaAccessibilityProbe($ui.StatusLabel.Handle, $ui.ActivitySpinner.Handle)
@@ -136,6 +148,17 @@ try {
     $ui.NewButton.PerformClick()
     Assert-Editor ($ui.NameInput.Text -ceq '' -and -not $ui.AlwaysOnTopCheck.Checked -and $ui.DedicatedProfileCheck.Checked) 'Approved New must reset all local window choices.'
     $script:DiscardApproved = $false
+    $originalSettings = ConvertTo-EeaSettings $ui.Settings
+    $placementSettings = ConvertTo-EeaSettings $ui.Settings
+    $placementSettings.DefaultDesktop = -not $originalSettings.DefaultDesktop
+    Set-EeaFormPreferences -Form $form -Settings $placementSettings
+    Assert-Editor ($ui.DesktopCheck.Checked -eq $placementSettings.DefaultDesktop -and (Get-EeaEditorSnapshot $form) -ceq $ui.EditorBaseline) 'Changed placement defaults must apply to a clean new website without creating unsaved changes.'
+    $ui.DesktopCheck.Checked = $originalSettings.DefaultDesktop
+    Set-EeaFormPreferences -Form $form -Settings $placementSettings
+    Assert-Editor ($ui.DesktopCheck.Checked -eq $originalSettings.DefaultDesktop) 'Saving preferences must not overwrite placement chosen for an unsaved new website.'
+    $ui.DesktopCheck.Checked = $placementSettings.DefaultDesktop
+    Set-EeaFormPreferences -Form $form -Settings $originalSettings
+    Assert-Editor ($ui.DesktopCheck.Checked -eq $originalSettings.DefaultDesktop -and (Get-EeaEditorSnapshot $form) -ceq $ui.EditorBaseline) 'Restored placement defaults must leave the new website clean.'
     $before = $script:DiscardRequests
     $ui.AppList.SelectedIndex = 1
     Assert-Editor ($script:DiscardRequests -eq $before -and -not $ui.DedicatedProfileCheck.Checked -and $ui.LaunchModeCombo.SelectedIndex -eq 1 -and -not $ui.AlwaysOnTopCheck.Enabled) 'Selecting a clean shared-profile app must preserve its route without prompting or enabling unsupported topmost behavior.'
@@ -168,6 +191,37 @@ try {
     Set-EeaEditorIcon -Form $form -IconData ([IO.File]::ReadAllBytes($iconPath))
     $ui.NewButton.PerformClick()
     Assert-Editor ($null -ne $ui.WebsiteIconData -and $ui.NameInput.Text -ceq 'First app') 'An icon-only edit must not be silently discarded.'
+    $onKeyDown = [Windows.Forms.Control].GetMethod('OnKeyDown', [Reflection.BindingFlags]'Instance, NonPublic')
+    $before = $script:DiscardRequests
+    $shortcut = New-Object Windows.Forms.KeyEventArgs([Windows.Forms.Keys]'Control, N')
+    [void]$onKeyDown.Invoke($form.PSObject.BaseObject, [object[]]@($shortcut.PSObject.BaseObject))
+    Assert-Editor ($shortcut.Handled -and $script:DiscardRequests -eq $before + 1 -and $ui.NameInput.Text -ceq 'First app') 'Ctrl+N must use the same draft protection as New.'
+    $shortcut = New-Object Windows.Forms.KeyEventArgs([Windows.Forms.Keys]'Control, S')
+    [void]$onKeyDown.Invoke($form.PSObject.BaseObject, [object[]]@($shortcut.PSObject.BaseObject))
+    Assert-Editor ($shortcut.Handled -and (Read-EeaManifest $context 'First app').IconKind -ceq 'Custom') 'Ctrl+S must save the current website like Save changes.'
+    $damagedContext = [pscustomobject]@{ Root = (Join-Path $testRoot 'Damaged\Data'); Desktop = (Join-Path $testRoot 'Damaged\Desktop'); Programs = (Join-Path $testRoot 'Damaged\Programs') }
+    $damagedFolder = Join-Path $damagedContext.Root ('Apps\' + ('e' * 64))
+    [void][IO.Directory]::CreateDirectory($damagedFolder)
+    [IO.File]::WriteAllText((Join-Path $damagedFolder 'app.json'), '{ "Name": "Damaged" }')
+    $damagedForm = New-EeaSetupForm -Context $damagedContext
+    try {
+        $damagedForm.StartPosition = [Windows.Forms.FormStartPosition]::Manual
+        $damagedForm.Location = New-Object Drawing.Point(-10000, -10000)
+        $damagedForm.ShowInTaskbar = $false
+        $damagedForm.Show()
+        $damagedUi = $damagedForm.Tag
+        Assert-Editor ($null -ne $damagedUi.EditorBaseline) 'A failed initial load must still establish draft protection.'
+        $damagedUi.NameInput.Text = 'Typed after a failed load'
+        $before = $script:DiscardRequests
+        $damagedUi.NewButton.PerformClick()
+        Assert-Editor ($script:DiscardRequests -eq $before + 1 -and $damagedUi.NameInput.Text -ceq 'Typed after a failed load') 'Draft protection must survive a failed initial app load.'
+        $script:DiscardApproved = $true
+        $damagedForm.Close()
+    }
+    finally {
+        $script:DiscardApproved = $false
+        $damagedForm.Dispose()
+    }
     $script:DiscardApproved = $true
     $form.Close()
     Assert-Editor $form.IsDisposed 'Approved Close must release the setup window.'

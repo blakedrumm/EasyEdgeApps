@@ -68,6 +68,42 @@ try {
             Assert-Rejected { ConvertTo-EeaName $invalidName }
         }
     }
+    Test-Case 'Letters capitalized differently by PowerShell editions are detected exactly' {
+        $georgianMail = [string]::Concat([char[]]@(0x10E4, 0x10DD, 0x10E1, 0x10E2, 0x10D0))
+        foreach ($editionSpecific in @($georgianMail, ('Micro' + [char]0x00B5), ('Long ' + [char]0x017F))) { Assert-Equal (Test-EeaEditionSpecificName $editionSpecific) $true }
+        foreach ($portable in @('My Mail', ('Caf' + [char]0x00E9), ('Greek ' + [char]0x039C + [char]0x03BC), ('Cyrillic ' + [char]0x0524))) { Assert-Equal (Test-EeaEditionSpecificName $portable) $false }
+    }
+    Test-Case 'New edition-specific names are refused only by PowerShell 7' {
+        $editionContext = [pscustomobject]@{ Root = (Join-Path $testRoot 'EditionNames\Data'); Desktop = (Join-Path $testRoot 'EditionNames\Desktop'); Programs = (Join-Path $testRoot 'EditionNames\Programs') }
+        $georgianMail = [string]::Concat([char[]]@(0x10E4, 0x10DD, 0x10E1, 0x10E2, 0x10D0))
+        if ($PSVersionTable.PSEdition -ceq 'Core') {
+            Assert-Rejected { Install-EeaApp -AppName $georgianMail -Website 'https://example.com/' -DedicatedProfile $false -Context $editionContext -Confirm:$false } '*save differently*'
+            Assert-Equal @(Get-EeaApps -Context $editionContext).Count 0
+        }
+        else {
+            $saved = Install-EeaApp -AppName $georgianMail -Website 'https://example.com/' -DedicatedProfile $false -Context $editionContext -Confirm:$false
+            Assert-Equal $saved.Name $georgianMail
+            Remove-EeaApp -AppName $georgianMail -Context $editionContext -Confirm:$false
+        }
+    }
+    Test-Case 'A website saved by another PowerShell edition is reported specifically' {
+        $editionContext = [pscustomobject]@{ Root = (Join-Path $testRoot 'OtherEdition\Data'); Desktop = (Join-Path $testRoot 'OtherEdition\Desktop'); Programs = (Join-Path $testRoot 'OtherEdition\Programs') }
+        $probe = Install-EeaApp -AppName 'Edition probe' -Website 'https://example.com/' -DedicatedProfile $false -Context $editionContext -Confirm:$false
+        $probePaths = Get-EeaPaths $editionContext 'Edition probe'
+        $foreignId = 'f' * 64
+        $foreignDirectory = Join-Path $probePaths.AppsRoot $foreignId
+        [void][IO.Directory]::CreateDirectory($foreignDirectory)
+        $foreignState = Read-EeaManifest $editionContext 'Edition probe'
+        $foreignState.Id = $foreignId
+        $foreignState.Name = [string]::Concat([char[]]@(0x10E4, 0x10DD, 0x10E1, 0x10E2, 0x10D0))
+        [IO.File]::WriteAllText((Join-Path $foreignDirectory 'app.json'), ($foreignState | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        Assert-Rejected { Get-EeaApps -Context $editionContext } '*different PowerShell edition*'
+        $foreignState.Name = 'Not this folder'
+        [IO.File]::WriteAllText((Join-Path $foreignDirectory 'app.json'), ($foreignState | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        Assert-Rejected { Get-EeaApps -Context $editionContext } '*damaged settings*'
+        [IO.Directory]::Delete($foreignDirectory, $true)
+        Assert-Equal @(Get-EeaApps -Context $editionContext)[0].Name $probe.Name
+    }
     Test-Case 'Real Windows shortcut roundtrip preserves safe arguments' {
         $shortcutPath = Join-Path $testRoot 'My News.lnk'
         $targetPath = Join-Path $env:SystemRoot 'System32\notepad.exe'
@@ -124,6 +160,27 @@ try {
         Assert-Equal $updated.Url 'https://example.com/new?size=large#/home'
         Assert-Equal (Test-EeaOwnedShortcut $paths.Desktop $updated $paths) $true
         Assert-Equal @(Get-EeaApps -Context $context).Count 1
+    }
+    Test-Case 'Kit previews call out an HTTPS to HTTP downgrade' {
+        $downgrade = [pscustomobject]@{ Product = 'EasyEdgeApps.AppKit'; SchemaVersion = 1; Name = 'Downgrade'; Apps = @([pscustomobject]@{ Name = 'My News'; Url = 'http://example.com/new?size=large#/home'; Desktop = $true; StartMenu = $true; Icon = [pscustomobject]@{ Kind = 'Generated'; Version = 1 } }) }
+        $row = @(Get-EeaKitPreview -Kit $downgrade -Context $context)[0]
+        Assert-Equal $row.Action 'Update'
+        Assert-Equal ($row.Detail -like 'CONNECTION CHANGES from HTTPS to HTTP*') $true
+    }
+    Test-Case 'Repeated names in one check are inspected once' {
+        Assert-Equal @(Get-EeaChecks -AppNames @('My News', 'my news', ' MY NEWS ') -Context $context).Count 1
+    }
+    Test-Case 'Reserved Favorites titles stay within the name limit' {
+        $favoriteName = ConvertTo-EeaFavoriteName -Title ('CON.' + ('x' * 56)) -Website 'https://example.com/'
+        Assert-Equal ($favoriteName.Length -le 60) $true
+        Assert-Equal $favoriteName.StartsWith('Website CON.') $true
+    }
+    Test-Case 'Empty exports and empty settings files explain themselves' {
+        $emptyContext = [pscustomobject]@{ Root = (Join-Path $testRoot 'EmptyData'); Desktop = (Join-Path $testRoot 'EmptyDesktop'); Programs = (Join-Path $testRoot 'EmptyPrograms') }
+        Assert-Rejected { New-EeaKit -Context $emptyContext } '*No saved websites*'
+        [void][IO.Directory]::CreateDirectory($emptyContext.Root)
+        [IO.File]::WriteAllBytes((Join-Path $emptyContext.Root 'settings.json'), [byte[]]@())
+        Assert-Rejected { Get-EeaSettings -Context $emptyContext } '*empty or damaged*'
     }
     Test-Case 'Unrelated shortcut collision is preserved' {
         $foreignPath = Join-Path $context.Desktop 'Other News.lnk'
@@ -185,6 +242,56 @@ try {
         }
         finally { Set-Item -Path Function:Write-EeaAtomicFile -Value $script:OriginalAtomicWriter }
     }
+    Test-Case 'A replacement that removes its destination before failing is restored' {
+        $paths = Get-EeaPaths $context 'My News'
+        $beforeStartMenu = (Get-FileHash -LiteralPath $paths.StartMenu).Hash
+        $beforeManifest = (Get-FileHash -LiteralPath $paths.Manifest).Hash
+        $script:OriginalAtomicWriter = ${function:Write-EeaAtomicFile}
+        $script:FailDestination = $paths.StartMenu
+        $script:InjectedFailures = 0
+        try {
+            function Write-EeaAtomicFile {
+                param([string]$Source, [string]$Destination)
+                if ($Destination -eq $script:FailDestination -and $script:InjectedFailures -eq 0) {
+                    $script:InjectedFailures++
+                    [IO.File]::Delete($Destination)
+                    throw 'Injected replacement failure after removing the destination.'
+                }
+                & $script:OriginalAtomicWriter -Source $Source -Destination $Destination
+            }
+            Assert-Rejected { Install-EeaApp -AppName 'My News' -Website 'https://example.com/changed' -Context $context -Confirm:$false } '*Injected replacement failure*'
+            Assert-Equal ([IO.File]::Exists($paths.StartMenu)) $true
+            Assert-Equal (Get-FileHash -LiteralPath $paths.StartMenu).Hash $beforeStartMenu
+            Assert-Equal (Get-FileHash -LiteralPath $paths.Manifest).Hash $beforeManifest
+            Assert-EeaReady $context
+        }
+        finally { Set-Item -Path Function:Write-EeaAtomicFile -Value $script:OriginalAtomicWriter }
+    }
+    Test-Case 'Atomic replacement waits briefly for a transient file lock' {
+        $lockRoot = Join-Path $testRoot 'TransientLock'
+        [void][IO.Directory]::CreateDirectory($lockRoot)
+        $destinationPath = Join-Path $lockRoot 'locked.txt'
+        $sourcePath = Join-Path $lockRoot 'source.txt'
+        [IO.File]::WriteAllText($destinationPath, 'Original value')
+        [IO.File]::WriteAllText($sourcePath, 'Replacement value')
+        $holder = [IO.File]::Open($destinationPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $started = New-Object Threading.ManualResetEventSlim($false)
+        $releaser = [PowerShell]::Create()
+        try {
+            [void]$releaser.AddScript({ param($Stream, $Started) $Started.Set(); Start-Sleep -Milliseconds 250; $Stream.Dispose() }).AddArgument($holder).AddArgument($started)
+            $pending = $releaser.BeginInvoke()
+            Assert-Equal ($started.Wait(30000)) $true
+            Write-EeaAtomicFile -Source $sourcePath -Destination $destinationPath
+            [void]$releaser.EndInvoke($pending)
+            Assert-Equal ([IO.File]::ReadAllText($destinationPath)) 'Replacement value'
+            Assert-Equal @([IO.Directory]::GetFiles($lockRoot, '.EasyEdgeApps.*.tmp')).Count 0
+        }
+        finally {
+            $releaser.Dispose()
+            $holder.Dispose()
+            $started.Dispose()
+        }
+    }
     Test-Case 'Completed temporary files do not block reading saved websites' {
         $pendingPath = Join-Path $context.Root '.pending'
         [void][IO.Directory]::CreateDirectory($pendingPath)
@@ -220,6 +327,192 @@ try {
             if ([IO.Directory]::Exists($pendingPath)) { [IO.Directory]::Delete($pendingPath, $true) }
         }
     }
+    Test-Case 'A failed cleanup retry keeps the completed change marker' {
+        $retryContext = [pscustomobject]@{ Root = Join-Path $testRoot 'FailedCleanupRetry'; Desktop = $context.Desktop; Programs = $context.Programs }
+        $pendingPath = Join-Path $retryContext.Root '.pending'
+        $destinationPath = Join-Path $retryContext.Root 'committed.txt'
+        $script:LockedResidue = $null
+        try {
+            Invoke-EeaTransaction -Context $retryContext -WarningAction SilentlyContinue -Prepare {
+                param($StagePath)
+                $sourcePath = Join-Path $StagePath 'change.txt'
+                [IO.File]::WriteAllText($sourcePath, 'Committed value')
+                $script:LockedResidue = [IO.File]::Open((Join-Path $StagePath 'locked.tmp'), [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                [pscustomobject]@{ Path = $destinationPath; Source = $sourcePath }
+            }
+            Assert-Rejected { Invoke-EeaTransaction -Context $retryContext -Prepare { param($StagePath) } } '*still using temporary files*'
+            Assert-Equal ([IO.File]::ReadAllText((Join-Path $pendingPath 'complete.txt'))) 'EasyEdgeApps:complete:1'
+            Assert-EeaReady $retryContext
+            $script:LockedResidue.Dispose()
+            Invoke-EeaTransaction -Context $retryContext -Prepare { param($StagePath) }
+            Assert-Equal ([IO.Directory]::Exists($pendingPath)) $false
+            Assert-Equal ([IO.File]::ReadAllText($destinationPath)) 'Committed value'
+        }
+        finally {
+            if ($null -ne $script:LockedResidue) { $script:LockedResidue.Dispose() }
+            if ([IO.Directory]::Exists($pendingPath)) { [IO.Directory]::Delete($pendingPath, $true) }
+        }
+    }
+    Test-Case 'Read-only residue from a completed change does not block the next change' {
+        $residueContext = [pscustomobject]@{ Root = Join-Path $testRoot 'ReadOnlyResidue'; Desktop = $context.Desktop; Programs = $context.Programs }
+        $pendingPath = Join-Path $residueContext.Root '.pending'
+        $readOnlyPath = Join-Path $pendingPath 'staged\read-only.tmp'
+        $destinationPath = Join-Path $residueContext.Root 'committed.txt'
+        try {
+            Invoke-EeaTransaction -Context $residueContext -WarningAction SilentlyContinue -Prepare {
+                param($StagePath)
+                $sourcePath = Join-Path $StagePath 'change.txt'
+                [IO.File]::WriteAllText($sourcePath, 'Committed value')
+                [IO.File]::WriteAllText($readOnlyPath, 'Temporary residue')
+                [IO.File]::SetAttributes($readOnlyPath, [IO.FileAttributes]::ReadOnly)
+                [pscustomobject]@{ Path = $destinationPath; Source = $sourcePath }
+            }
+            Assert-Equal ([IO.File]::ReadAllText((Join-Path $pendingPath 'complete.txt'))) 'EasyEdgeApps:complete:1'
+            Invoke-EeaTransaction -Context $residueContext -Prepare { param($StagePath) }
+            Assert-Equal ([IO.Directory]::Exists($pendingPath)) $false
+            Assert-Equal ([IO.File]::ReadAllText($destinationPath)) 'Committed value'
+        }
+        finally {
+            if ([IO.File]::Exists($readOnlyPath)) { [IO.File]::SetAttributes($readOnlyPath, [IO.FileAttributes]::Normal) }
+            if ([IO.Directory]::Exists($pendingPath)) { [IO.Directory]::Delete($pendingPath, $true) }
+        }
+    }
+    Test-Case 'Stopping during a change rolls back files that were already replaced' {
+        $stopRoot = Join-Path $testRoot 'StoppedChange'
+        $runner = [PowerShell]::Create()
+        try {
+            [void]$runner.AddScript({
+                param($ScriptPath, $Root)
+                $ErrorActionPreference = 'Stop'
+                . $ScriptPath
+                $stopContext = [pscustomobject]@{ Root = (Join-Path $Root 'Data'); Desktop = (Join-Path $Root 'Desktop'); Programs = (Join-Path $Root 'Programs') }
+                [void][IO.Directory]::CreateDirectory($stopContext.Root)
+                $firstPath = Join-Path $stopContext.Root 'first.txt'
+                $secondPath = Join-Path $stopContext.Root 'second.txt'
+                [IO.File]::WriteAllText($firstPath, 'Original first')
+                [IO.File]::WriteAllText($secondPath, 'Original second')
+                $originalWriter = ${function:Write-EeaAtomicFile}
+                $signalPath = Join-Path $Root 'first-replaced.txt'
+                $calls = @{ Count = 0 }
+                Set-Item -Path Function:Write-EeaAtomicFile -Value {
+                    param($Source, $Destination)
+                    & $originalWriter $Source $Destination
+                    $calls.Count++
+                    if ($calls.Count -eq 1) {
+                        [IO.File]::WriteAllText($signalPath, 'replaced')
+                        Start-Sleep -Seconds 30
+                    }
+                }
+                Invoke-EeaTransaction -Context $stopContext -Prepare {
+                    param($StagePath)
+                    $firstSource = Join-Path $StagePath 'first.txt'
+                    $secondSource = Join-Path $StagePath 'second.txt'
+                    [IO.File]::WriteAllText($firstSource, 'Changed first')
+                    [IO.File]::WriteAllText($secondSource, 'Changed second')
+                    [pscustomobject]@{ Path = $firstPath; Source = $firstSource }
+                    [pscustomobject]@{ Path = $secondPath; Source = $secondSource }
+                }
+            }).AddArgument((Join-Path $PSScriptRoot '..\EasyEdgeApps.ps1')).AddArgument($stopRoot)
+            $pending = $runner.BeginInvoke()
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while (-not [IO.File]::Exists((Join-Path $stopRoot 'first-replaced.txt')) -and -not $pending.IsCompleted -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+            Assert-Equal ([IO.File]::Exists((Join-Path $stopRoot 'first-replaced.txt'))) $true
+            $runner.Stop()
+            try { [void]$runner.EndInvoke($pending) } catch { }
+            $stopContext = [pscustomobject]@{ Root = (Join-Path $stopRoot 'Data'); Desktop = (Join-Path $stopRoot 'Desktop'); Programs = (Join-Path $stopRoot 'Programs') }
+            Assert-Equal ([IO.File]::ReadAllText((Join-Path $stopContext.Root 'first.txt'))) 'Original first'
+            Assert-Equal ([IO.File]::ReadAllText((Join-Path $stopContext.Root 'second.txt'))) 'Original second'
+            Assert-EeaReady $stopContext
+        }
+        finally { $runner.Dispose() }
+    }
+    Test-Case 'Stopping while an interrupted step is being undone still restores it' {
+        $stopRoot = Join-Path $testRoot 'StoppedUndo'
+        $runner = [PowerShell]::Create()
+        try {
+            [void]$runner.AddScript({
+                param($ScriptPath, $Root)
+                $ErrorActionPreference = 'Stop'
+                . $ScriptPath
+                $stopContext = [pscustomobject]@{ Root = (Join-Path $Root 'Data'); Desktop = (Join-Path $Root 'Desktop'); Programs = (Join-Path $Root 'Programs') }
+                [void][IO.Directory]::CreateDirectory($stopContext.Root)
+                $targetPath = Join-Path $stopContext.Root 'target.txt'
+                [IO.File]::WriteAllText($targetPath, 'Original target')
+                $originalWriter = ${function:Write-EeaAtomicFile}
+                $signalPath = Join-Path $Root 'restoring.txt'
+                $calls = @{ Count = 0 }
+                Set-Item -Path Function:Write-EeaAtomicFile -Value {
+                    param($Source, $Destination)
+                    $calls.Count++
+                    if ($calls.Count -eq 1) {
+                        [IO.File]::Delete($Destination)
+                        throw 'Injected failure after removing the destination.'
+                    }
+                    if ($calls.Count -eq 2) {
+                        [IO.File]::WriteAllText($signalPath, 'restoring')
+                        Start-Sleep -Seconds 30
+                    }
+                    & $originalWriter $Source $Destination
+                }
+                Invoke-EeaTransaction -Context $stopContext -Prepare {
+                    param($StagePath)
+                    $targetSource = Join-Path $StagePath 'target.txt'
+                    [IO.File]::WriteAllText($targetSource, 'Changed target')
+                    [pscustomobject]@{ Path = $targetPath; Source = $targetSource }
+                }
+            }).AddArgument((Join-Path $PSScriptRoot '..\EasyEdgeApps.ps1')).AddArgument($stopRoot)
+            $pending = $runner.BeginInvoke()
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while (-not [IO.File]::Exists((Join-Path $stopRoot 'restoring.txt')) -and -not $pending.IsCompleted -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+            Assert-Equal ([IO.File]::Exists((Join-Path $stopRoot 'restoring.txt'))) $true
+            $runner.Stop()
+            try { [void]$runner.EndInvoke($pending) } catch { }
+            $dataRoot = Join-Path $stopRoot 'Data'
+            $targetPath = Join-Path $dataRoot 'target.txt'
+            $restored = [IO.File]::Exists($targetPath) -and [IO.File]::ReadAllText($targetPath) -ceq 'Original target'
+            $recoverable = [IO.File]::Exists((Join-Path $dataRoot '.pending\journal.json')) -and [IO.File]::Exists((Join-Path $dataRoot '.pending\0.backup'))
+            Assert-Equal ($restored -or $recoverable) $true
+        }
+        finally { $runner.Dispose() }
+    }
+    Test-Case 'Atomic replacement refuses to overwrite a file changed while it waited' {
+        $lockRoot = Join-Path $testRoot 'ChangedWhileLocked'
+        [void][IO.Directory]::CreateDirectory($lockRoot)
+        $destinationPath = Join-Path $lockRoot 'locked.txt'
+        $sourcePath = Join-Path $lockRoot 'source.txt'
+        [IO.File]::WriteAllText($destinationPath, 'Original value')
+        [IO.File]::WriteAllText($sourcePath, 'Replacement value')
+        $holder = [IO.File]::Open($destinationPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        $started = New-Object Threading.ManualResetEventSlim($false)
+        $writer = [PowerShell]::Create()
+        try {
+            [void]$writer.AddScript({
+                param($Stream, $Started, $Path)
+                $Started.Set()
+                Start-Sleep -Milliseconds 300
+                $outside = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+                try {
+                    $bytes = [Text.Encoding]::UTF8.GetBytes('Outside value')
+                    $outside.SetLength(0)
+                    $outside.Write($bytes, 0, $bytes.Length)
+                }
+                finally { $outside.Dispose() }
+                Start-Sleep -Milliseconds 200
+                $Stream.Dispose()
+            }).AddArgument($holder).AddArgument($started).AddArgument($destinationPath)
+            $pending = $writer.BeginInvoke()
+            Assert-Equal ($started.Wait(30000)) $true
+            Assert-Rejected { Write-EeaAtomicFile -Source $sourcePath -Destination $destinationPath } '*changed outside*'
+            [void]$writer.EndInvoke($pending)
+            Assert-Equal ([IO.File]::ReadAllText($destinationPath)) 'Outside value'
+            Assert-Equal @([IO.Directory]::GetFiles($lockRoot, '.EasyEdgeApps.*.tmp')).Count 0
+        }
+        finally {
+            $writer.Dispose()
+            $holder.Dispose()
+            $started.Dispose()
+        }
+    }
     Test-Case 'An interrupted transaction blocks further changes and keeps recovery files' {
         $interruptedContext = [pscustomobject]@{
             Root = Join-Path $testRoot 'Interrupted'
@@ -233,6 +526,41 @@ try {
             Assert-Equal (Test-Path -LiteralPath $pendingPath) $true
         }
         finally { [IO.Directory]::Delete($pendingPath) }
+    }
+    Test-Case 'A change in progress is not reported as needing recovery' {
+        $busyContext = [pscustomobject]@{ Root = Join-Path $testRoot 'ChangeInProgress'; Desktop = $context.Desktop; Programs = $context.Programs }
+        $pendingPath = Join-Path $busyContext.Root '.pending'
+        [void][IO.Directory]::CreateDirectory($pendingPath)
+        $holder = [PowerShell]::Create()
+        $acquired = New-Object Threading.ManualResetEventSlim($false)
+        $release = New-Object Threading.ManualResetEventSlim($false)
+        try {
+            [void]$holder.AddScript({
+                param($Name, $Acquired, $Release)
+                $mutex = New-Object Threading.Mutex($false, $Name)
+                try {
+                    if ($mutex.WaitOne(30000)) {
+                        $Acquired.Set()
+                        [void]$Release.Wait(60000)
+                        $mutex.ReleaseMutex()
+                    }
+                }
+                finally { $mutex.Dispose() }
+            }).AddArgument((Get-EeaMutexName)).AddArgument($acquired).AddArgument($release)
+            $pending = $holder.BeginInvoke()
+            Assert-Equal ($acquired.Wait(30000)) $true
+            Assert-Rejected { Get-EeaApps -Context $busyContext } '*in progress*'
+            $release.Set()
+            [void]$holder.EndInvoke($pending)
+            Assert-Rejected { Get-EeaApps -Context $busyContext } '*needs recovery*'
+        }
+        finally {
+            $release.Set()
+            $holder.Dispose()
+            $acquired.Dispose()
+            $release.Dispose()
+            [IO.Directory]::Delete($pendingPath)
+        }
     }
     Test-Case 'Remove WhatIf keeps installed files' {
         $paths = Get-EeaPaths $context 'My News'
@@ -262,6 +590,38 @@ try {
         Assert-Equal ($manifestBytes[0] -eq 0xef -and $manifestBytes[1] -eq 0xbb -and $manifestBytes[2] -eq 0xbf) $false
         Assert-Equal (Read-EeaManifest $context $accentedName).Name $accentedName
         Remove-EeaApp -AppName $accentedName -Context $context -Confirm:$false
+    }
+    Test-Case 'Apps named outside the Windows code page stay manageable' {
+        $worldContext = [pscustomobject]@{ Root = (Join-Path $testRoot 'WorldNames\Data'); Desktop = (Join-Path $testRoot 'WorldNames\Desktop'); Programs = (Join-Path $testRoot 'WorldNames\Programs') }
+        $worldNames = @(
+            [string]::Concat([char[]]@(0x041F, 0x043E, 0x0447, 0x0442, 0x0430)),
+            [string]::Concat([char[]]@(0x90AE, 0x4EF6)),
+            ([char]::ConvertFromUtf32(0x1F4E7) + ' Mail')
+        )
+        foreach ($worldName in $worldNames) {
+            $saved = Install-EeaApp -AppName $worldName -Website 'https://example.com/' -DedicatedProfile $false -Context $worldContext -Confirm:$false
+            $worldPaths = Get-EeaPaths $worldContext $worldName
+            Assert-Equal (Test-EeaOwnedShortcut $worldPaths.Desktop $saved $worldPaths) $true
+            Assert-Equal (Test-EeaOwnedShortcut $worldPaths.StartMenu $saved $worldPaths) $true
+            Assert-Equal @(Get-EeaChecks -AppNames @($worldName) -Context $worldContext)[0].Status 'Healthy'
+            $updated = Install-EeaApp -AppName $worldName -Website 'https://example.com/updated' -Context $worldContext -Confirm:$false
+            Assert-Equal $updated.Url 'https://example.com/updated'
+            Remove-EeaApp -AppName $worldName -Context $worldContext -Confirm:$false
+            Assert-Equal ([IO.File]::Exists($worldPaths.Desktop)) $false
+            Assert-Equal ([IO.File]::Exists($worldPaths.Manifest)) $false
+        }
+    }
+    Test-Case 'The Unicode shortcut reader agrees with Windows Script Host' {
+        $readerRoot = Join-Path $testRoot 'ShortcutReader'
+        [void][IO.Directory]::CreateDirectory($readerRoot)
+        $shortcutPath = Join-Path $readerRoot 'Reader check.lnk'
+        $targetPath = Join-Path $env:SystemRoot 'System32\notepad.exe'
+        Write-EeaShortcut -Path $shortcutPath -Target $targetPath -Arguments (Get-EeaArguments 'https://example.com/?a=1&b=%22two%22#/x') -Description 'EasyEdgeApps:reader' -Icon ($targetPath + ',0') -WindowStyle 1
+        $scriptHost = Read-EeaShortcut $shortcutPath
+        $unicode = (Initialize-EeaShortcutReader)::Read($shortcutPath)
+        foreach ($field in @('TargetPath', 'Arguments', 'Description', 'IconLocation', 'WorkingDirectory', 'WindowStyle')) {
+            Assert-Equal ([string]$unicode.$field) ([string]$scriptHost.$field)
+        }
     }
     Test-Case 'Changing placement removes only the previously owned shortcut' {
         Install-EeaApp -AppName 'Placement' -Website 'https://example.com/' -Context $context -Confirm:$false | Out-Null

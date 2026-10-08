@@ -41,10 +41,11 @@ public sealed class EditorSession : IDisposable
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
-    public Task LoadIconAsync(string source, Func<CancellationToken, Task<byte[]>> load, CancellationToken cancellationToken = default)
+    public Task<bool> LoadIconAsync(string source, Func<CancellationToken, Task<byte[]>> load, CancellationToken cancellationToken = default)
         => LoadWebsiteIconAsync(source, async token => new("", source, ".ico", await load(token)), cancellationToken);
 
-    public Task LoadWebsiteIconAsync(string source, Func<CancellationToken, Task<DownloadedIcon>> load, CancellationToken cancellationToken = default)
+    // Completes with true only when this request's icon reached the draft; superseded, cancelled, and failed work completes with false.
+    public Task<bool> LoadWebsiteIconAsync(string source, Func<CancellationToken, Task<DownloadedIcon>> load, CancellationToken cancellationToken = default)
     {
         CancelPending();
         iconFailed = false;
@@ -54,13 +55,15 @@ public sealed class EditorSession : IDisposable
         var expected = ++workGeneration;
         workCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var token = workCancellation.Token;
-        pendingWork = CompleteIconAsync(expected, load, token);
+        var work = CompleteIconAsync(expected, load, token);
+        pendingWork = work;
         Changed?.Invoke(this, EventArgs.Empty);
-        return pendingWork;
+        return work;
     }
 
-    private async Task CompleteIconAsync(long expected, Func<CancellationToken, Task<DownloadedIcon>> load, CancellationToken token)
+    private async Task<bool> CompleteIconAsync(long expected, Func<CancellationToken, Task<DownloadedIcon>> load, CancellationToken token)
     {
+        var applied = false;
         try
         {
             var image = await load(token);
@@ -75,12 +78,14 @@ public sealed class EditorSession : IDisposable
                     RequestedWebsite = image.Website.Length == 0 ? Draft.RequestedWebsite : null, IconSource = image.Source
                 };
                 LastError = "";
+                applied = true;
             }
         }
         catch (OperationCanceledException) { if (expected == workGeneration) { iconFailed = true; LastError = "Icon work was cancelled. Choose another icon, Use saved icon, or Automatic before saving."; } }
         catch (Exception failure) when (failure is ValidationException or IOException or HttpRequestException or InvalidOperationException)
         { if (expected == workGeneration) { iconFailed = true; LastError = "The icon could not be prepared. Choose another icon, Use saved icon, or Automatic before saving."; } }
         finally { if (expected == workGeneration) pendingWork = null; Changed?.Invoke(this, EventArgs.Empty); }
+        return applied;
     }
 
     public async Task<bool> SaveAsync(Func<EditorDraft, CancellationToken, Task<AppDefinition>> save, CancellationToken cancellationToken = default)
